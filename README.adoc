@@ -1,0 +1,16 @@
+= Simple Drawing Tool
+(c) Stefan Salewski 2021                                     
+//Version 0.1 JULY 2021  
+:experimental:
+:imagesdir: http://ssalewski.de/tmp
+:source-highlighter: pygments
+:pygments-style: monokai
+:icons: font
+
+image::sdt1.png[]
+
+This is a simple 2D drawing and construction tool.
+
+Written in the Nim programming language using GTK4, Cairo, Pango.
+
+The tool is in a very early stage still.
