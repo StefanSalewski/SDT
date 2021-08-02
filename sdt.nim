@@ -7,27 +7,28 @@
 #
 # (c) S. Salewski 2020, 2021
 # License MIT
-# v0.1 2021-JUL-28
+# v0.1 2021-AUG-02
 
 import std/[times, parseutils, strutils, strformat]
 from std/math import round, floor, `^`, `mod`
-from std/sequtils import mapIt
+from std/sequtils import mapIt, applyIt
 import gintro/[gtk4, gdk4, glib, gobject, gio, cairo, pango, pangocairo]
 import rtree
 import salewski, minmax #xpairs
 
 const
   ZoomFactorMouseWheel = 1.1
-  ZoomFactorSelectMax = 10 # ignore zooming in tiny selection
-  ZoomNearMousepointer = true # mouse wheel zooming -- to mouse-pointer or center
+  ZoomFactorSelectMax = 10         # ignore zooming in tiny selection
+  ZoomNearMousepointer = true      # mouse wheel zooming -- to mouse-pointer or center
   SelectRectCol = [0.0, 0, 1, 0.5] # blue with transparency
 
 const
-  DefaultWorldRange = [0.0, 0, 100, 100]
-  DefaultGrid = [100.0 , 10, 100, 10]
+  DefaultWindowSize = (2400, 1800)
+  DefaultWorldRange = [0.0, 0, 600, 400]
+  DefaultGrid = [100.0, 10, 100, 10]
 
 const
-  GrabDist = 3 # mm
+  GrabDist = 3           # mm
   DefaultLineWidth = 0.2 # mm
 
 const menuData = """
@@ -82,13 +83,7 @@ type
     lineWidth: float
     lineCap: LineCap
     lineJoin: LineJoin
-    color: RGBA # gdk4.RGBA ?
-
-var styles: array[4, Style]
-styles[0] = Style(lineWidth: 1.0, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (0.0, 0.0, 1.0, 1.0))
-styles[1] = Style(lineWidth: 0.5, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (1.0, 0.0, 0.0, 1.0))
-styles[2] = Style(lineWidth: 1.5, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (0.0, 1.0, 0.0, 1.0))
-styles[3] = Style(lineWidth: 4.0, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (1.0, 0.0, 0.0, 1.0))
+    color: RGBA
 
 type
   Shapes {.pure.} = enum
@@ -97,6 +92,13 @@ type
 type
   Styles {.pure.} = enum
     medium, thin, thick, fat, none
+
+# we could use the enums as indices directly, but later we do user extent the style set...
+var styles: array[4, Style]
+styles[Styles.medium.ord] = Style(lineWidth: 1.0, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (0.0, 0.0, 1.0, 1.0))
+styles[Styles.thin.ord] = Style(lineWidth: 0.5, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (1.0, 0.0, 0.0, 1.0))
+styles[Styles.thick.ord] = Style(lineWidth: 1.5, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (0.0, 1.0, 0.0, 1.0))
+styles[Styles.fat.ord] = Style(lineWidth: 4.0, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (1.0, 0.0, 0.0, 1.0))
 
 type
   V2 = tuple[x, y: float]
@@ -114,12 +116,10 @@ proc `+`(a, b: V2): V2 =
 proc `-`(a, b: V2): V2 =
   (a.x - b.x, a.y - b.y)
 
-type CColor =
-  array[4, float]
-
 # copy from the cdt module
-func distanceLinePointSqr(x1, y1, x2, y2, x3, y3: float): (float, float, float, float, float) =
-  assert(x2 != x1 or y2 != y1) # division by zero 
+func distanceLinePointSqr(p1, p2, p: V2): (float, float, float, float, float) =
+  let (x1, y1, x2, y2, x3, y3) = (p1.x, p1.y, p2.x, p2.y, p.x, p.y)
+  assert(x2 != x1 or y2 != y1) # division by zero
   let
     u = ((x3 - x1) * (x2 - x1) + (y3 - y1) * (y2 - y1)) / ((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1))
     x = x1 + u * (x2 - x1)
@@ -183,19 +183,20 @@ type
   Element = ref object of RootRef
     style: Styles
     p: seq[V2]
-    width: float
-    height: float
     hover: bool
     selected: bool
     text: string
     gx, gy: int # text grab
-    grabPos: array[9, tuple[x, y: float]]
+    #grabPos: array[9, tuple[x, y: float]] # we can reuse instead  p: seq[V2]
     isNew: bool
 
-template x1(e: Element):float = e.p[0].x
-template y1(e: Element):float  = e.p[0].y
-template x2(e: Element):float  = e.p[1].x
-template y2(e: Element):float  = e.p[1].y
+proc grabPos(e: Element; i: int): var V2 =
+  e.p[i + 2]
+
+template x1(e: Element): float = e.p[0].x
+template y1(e: Element): float = e.p[0].y
+template x2(e: Element): float = e.p[1].x
+template y2(e: Element): float = e.p[1].y
 
 template `x1=`(e: Element; v: float) = e.p[0].x = v
 template `y1=`(e: Element; v: float) = e.p[0].y = v
@@ -226,8 +227,7 @@ type
     circs: seq[Circ]
 
 proc move(el: Element; v: V2) =
-  for p in mitems(el.p):
-    p += v
+  el.p.applyIt(it + v)
 
 # constructors
 proc newLine(p1, p2: V2): Line =
@@ -246,49 +246,50 @@ proc sortedPair(p1, p2: V2): tuple[a, b: V2] =
 proc newRect(p1, p2: V2): Rect =
   let h = sortedPair(p1, p2)
   Rect(p: @[h[0], h[1]])
- 
+
 proc newCirc(p1, p2: V2): Circ =
   Circ(p: @[p1, p2])
 
 proc newText(p1, p2: V2; text: string): Text =
-  Text(p: @[p1, p2], text: text)
+  result = Text(text: text)
+  result.p = newSeq[V2](2 + 9)
+  result.p[0] = p1
+  result.p[1] = p2
 
 # distances
-proc sqrDistanceLine(l: Line; x, y: float): float =
-  distanceLinePointSqr(x1 = l.p[0].x, l.p[0].y, l.p[1].x, l.p[1].y, x, y)[1]
+proc sqrDistanceLine(l: Line; xy: V2): float =
+  distanceLinePointSqr(l.p[0], l.p[1], xy)[1]
 
-proc sqrDistancePath(l: Path; x, y: float): float =
+proc sqrDistancePath(l: Path; xy: V2): float =
   result = float.high
   for l in l.p.xpairs:
-    let h = distanceLinePointSqr(l[0].x, l[0].y, l[1].x, l[1].y, x, y)[1]
-    if h < result:
-      result = h
+    result = min(result, distanceLinePointSqr(l[0], l[1], xy)[1])
 
-proc sqrDistanceTrace(t: Trace; x, y: float): float =
-  distanceLinePointSqr(x1 = t.p[0].x, t.p[0].y, t.p[1].x, t.p[1].y, x, y)[1]
+proc sqrDistanceTrace(t: Trace; xy: V2): float =
+  distanceLinePointSqr(t.p[0], t.p[1], xy)[1]
 
-proc sqrDistanceRB(x1, y1, x2, y2, x, y: float): float = # distance to rectangle border
-  [(x1, y1, x1, y2), (x1, y1, x2, y1), (x2, y2, x1, y2), (x2, y2, x2, y1)].mapIt(distanceLinePointSqr(it[0], it[1], it[2], it[3], x, y)[1]).min
+proc sqrDistanceRB(x1, y1, x2, y2: float; xy: V2): float = # distance to rectangle border
+  [(x1, y1, x1, y2), (x1, y1, x2, y1), (x2, y2, x1, y2), (x2, y2, x2, y1)].mapIt(distanceLinePointSqr((it[0], it[1]), (it[2], it[3]), xy)[1]).min
 
-proc sqrDistanceR(x1, y1, x2, y2, x, y: float): float =
-  if (x > x1 and x < x2) and (y > y1 and y < y2): # in rectangle
+proc sqrDistanceR(x1, y1, x2, y2: float; xy: V2): float =
+  if (xy.x > x1 and xy.x < x2) and (xy.y > y1 and xy.y < y2): # in rectangle
     return 0
-  sqrDistanceRB(x1, y1, x2, y2, x, y) # distance to boarder
+  sqrDistanceRB(x1, y1, x2, y2, xy) # distance to boarder
 
-proc sqrDistanceRect(r: Rect; x, y: float): float =
-  sqrDistanceR(r.x1, r.y1, r.x2, r.y2, x, y)
- 
-proc sqrDistanceCirc(c: Circ; x, y: float): float =
-  max(math.hypot(c.x1 - x, c.y1 - y) - math.hypot(c.x1 - c.x2, c.y1 - c.y2), 0) ^ 2
+proc sqrDistanceRect(r: Rect; xy: V2): float =
+  sqrDistanceR(r.x1, r.y1, r.x2, r.y2, xy)
 
-proc sqrDistanceText(t: Text; x, y: float): float =
-  var (x, y) = (x, y)
-  x += t.width * (t.gx mod 3).float * 0.5
-  y += t.height * (t.gy mod 3).float * 0.5
-  sqrDistanceR(t.x1, t.y1, t.x2, t.y2, x, y)
+proc sqrDistanceCirc(c: Circ; xy: V2): float =
+  max(math.hypot(c.x1 - xy.x, c.y1 - xy.y) - math.hypot(c.x1 - c.x2, c.y1 - c.y2), 0) ^ 2
 
-proc sqrDistanceGroup(g: Group; x, y: float): float =
-  sqrDistanceR(g.x1, g.y1, g.x2, g.y2, x, y)
+proc sqrDistanceText(t: Text; xy: V2): float =
+  var (x, y) = xy
+  x += (t.p[1].x - t.p[0].x) * (t.gx mod 3).float * 0.5
+  y += (t.p[1].y - t.p[0].y) * (t.gy mod 3).float * 0.5
+  sqrDistanceR(t.x1, t.y1, t.x2, t.y2, (x, y)) # caution, this is not xy!
+
+proc sqrDistanceGroup(g: Group; xy: V2): float =
+  sqrDistanceR(g.x1, g.y1, g.x2, g.y2, xy)
 
 type
   UserAction {.pure.} = enum
@@ -297,7 +298,8 @@ type
     lmbdo, # left mouse button pressed over object
     zooming,
     selecting,
-    dragging
+    dragging,
+    constructing
 
 type
   Tree = RStarTree[8, 2, float, Element]
@@ -319,15 +321,13 @@ type
     points: seq[V2]
     activeObj: Element
     movingObj: Element
-    activeState: int 
+    activeState: int
     hover, lastHover: Element
-    bcolor: CColor
-    majorGridColor: CColor
-    minorGridColor: CColor
-    guideColor: CColor
-    majorGrid: float
-    minorGrid: float
-    activeGrid: float
+    bcolor: RGBA
+    majorGridColor: RGBA
+    minorGridColor: RGBA
+    guideColor: RGBA
+    activeGrid: V2
     zoomNearMousepointer: bool
     selecting: bool
     uact: UserAction
@@ -358,7 +358,7 @@ type
     zoomRect: V2
     oldSizeX: int
     oldSizeY: int
-    legEvX, legEvY: float
+    legEvXY: V2
 
 ### The gaction menu procs
 
@@ -387,13 +387,10 @@ proc radio(action: gio.SimpleAction; parameter: glib.Variant; label: Label) =
 
 proc initCData(result: var PDA) =
   result.tree = newRStarTree[8, 2, float, Element]()
-  result.bcolor= [float 1, 1, 1, 1]
-  result.majorGridColor= [float 0, 0, 0, 1]
-  result.minorGridColor= [float 0, 0, 0, 0.4]
-  result.guideColor= [float 1, 0, 0, 0.7]
-  result.majorGrid = 100
-  result.minorGrid = 10
-  result.activeGrid = 10
+  result.bcolor = (1.0, 1.0, 1.0, 1.0)
+  result.majorGridColor = (0.0, 0.0, 0.0, 1.0)
+  result.minorGridColor = (0.0, 0.0, 0.0, 0.4)
+  result.guideColor = (1.0, 0.0, 0.0, 0.7)
   result.activeShape = Shapes.line
 
 # we will fix this proc later, it's good enough for now
@@ -414,11 +411,11 @@ proc absToScr(pda: PDA; x: float): float =
     #let mm: int  = gdk4.getWidth_mm(m) # this is for exact size
     let mm = 500
     # a 27 inch screen is our basis configuration -- larger screens are used with more distance, so we may scale then up with
-    # const mm = 600.0 
+    # const mm = 600.0
     # scale = float(s) * float(r.width) / float(mm)
     scale = float(s) * float(1) / float(mm)
-  #let fullScale = min(r.width.float / this.dataWidth,
-  #    r.height.float / this.dataHeight)
+  #let fullScale = min(r.width.float / pda.dataWidth,
+  #    r.height.float / pda.dataHeight)
   let h = min(pda.darea.allocatedWidth.float, pda.darea.allocatedHeight.float)
   return x * scale * h / pda.fullscale # * customDetailScale # compensate monitor distance, viewing angle
 
@@ -446,15 +443,15 @@ proc drawGrabCirc(pda: PDA; x, y: float) =
   pda.cr.stroke
 
 # event coordinates to user space
-proc getUserCoordinates(this: PDA; v: V2): V2 =
-  ((v.x - this.hadjustment.upper * 0.5 + this.hadjustment.value) / (this.fullScale * this.userZoom) + this.dataX + this.dataWidth * 0.5,
-   (v.y - this.vadjustment.upper * 0.5 + this.vadjustment.value) / (this.fullScale * this.userZoom) + this.dataY + this.dataHeight * 0.5)
+proc getUserCoordinates(pda: PDA; v: V2): V2 =
+  ((v.x - pda.hadjustment.upper * 0.5 + pda.hadjustment.value) / (pda.fullScale * pda.userZoom) + pda.dataX + pda.dataWidth * 0.5,
+   (v.y - pda.vadjustment.upper * 0.5 + pda.vadjustment.value) / (pda.fullScale * pda.userZoom) + pda.dataY + pda.dataHeight * 0.5)
 
 proc roundToMultiple(x, m: float): float =
   ((x / m) + 0.5).floor * m
 
 proc roundToGrid(pda: PDA; v: V2): V2 =
-  (roundToMultiple(v.x, pda.activeGrid), roundToMultiple(v.y, pda.activeGrid))
+  (roundToMultiple(v.x, pda.activeGrid.x), roundToMultiple(v.y, pda.activeGrid.y))
 
 proc cairoDevRound(w: float): float =
   if w < 1.5:
@@ -463,7 +460,7 @@ proc cairoDevRound(w: float): float =
     floor((w + 0.5) mod 2) / 2
 
 proc move(pda: PDA): bool =
-  let (a, b) = (pda.lastButtonDownPosUser)#.x, pda.lastButtonDownPosUser.y)
+  let (a, b) = (pda.lastButtonDownPosUser) #.x, pda.lastButtonDownPosUser.y)
   let dxdy = pda.roundToGrid(pda.getUserCoordinates(pda.lastMousePos) - pda.lastButtonDownPosUser)
   let (x1, y1, x2, y2) = (pda.movingObj.x1, pda.movingObj.y1, pda.movingObj.x2, pda.movingObj.y2)
 
@@ -483,18 +480,19 @@ proc move(pda: PDA): bool =
         pda.movingObj.p[1] += dxdy
         pda.lastButtonDownPosUser += dxdy
         return true
-      if a > x1 - d and a <  x1 + d:
+      if a > x1 - d and a < x1 + d:
         pda.movingObj.x1 += dxdy[0]
-      elif a > x2 - d and a <  x2 + d:
+      elif a > x2 - d and a < x2 + d:
         pda.movingObj.x2 += dxdy[0]
-      if b > y1 - d and b <  y1 + d:
+      if b > y1 - d and b < y1 + d:
         pda.movingObj.y1 += dxdy[1]
-      elif b > y2 - d and b <  y2 + d:
+      elif b > y2 - d and b < y2 + d:
         pda.movingObj.y2 += dxdy[1]
   elif pda.movingObj of Group:
     move(pda.movingObj, dxdy)
     for el in Group(pda.movingObj).lines:
-      move(el, dxdy)
+      let h = cast[Element](el) # silly nimsuggest issue
+      move(h, dxdy)
     for el in Group(pda.movingObj).circs:
       move(el, dxdy)
   elif (a - pda.movingObj.x1) ^ 2 + (b - pda.movingObj.y1) ^ 2 < (pda.absToScr(GrabDist)) ^ 2:
@@ -579,21 +577,17 @@ proc boxCirc(c: Circ; pda: PDA): rtree.Box[2, float] =
   [(c.x1 - r, c.x1 + r), (c.y1 - r, c.y1 + r)]
 
 proc boxText(t: Text; pda: PDA): rtree.Box[2, float] =
-  let dx = -t.width * (t.gx mod 3).float * 0.5
-  let dy = -t.height * (t.gy mod 3).float * 0.5
+  let dx = -(t.p[1].x - t.p[0].x) * (t.gx mod 3).float * 0.5
+  let dy = -(t.p[1].y - t.p[0].y) * (t.gy mod 3).float * 0.5
   [(t.x1 + dx, t.x2 + dx), (t.y1 + dy, t.y2 + dy)]
 
 proc boxPath(l: Path; pda: PDA): rtree.Box[2, float] =
   var (xa, xb, ya, yb) = (l.p[0].x, l.p[0].x, l.p[0].y, l.p[0].y)
   for el in l.p:
-    if el.x < xa:
-      xa = el.x
-    if el.x > xb:
-      xb = el.x
-    if el.y < ya:
-      ya = el.y
-    if el.y > yb:
-      yb = el.y
+    xa = min(xa, el.x)
+    xb = max(xb, el.x)
+    ya = min(ya, el.y)
+    yb = max(yb, el.y)
   [(xa, xb), (ya, yb)]
 
 proc boxEl(el: Element; pda: PDA): rtree.Box[2, float] =
@@ -645,20 +639,20 @@ proc drawRect(r: Rect; pda: PDA) = # rectangle
   pda.cr.rectangle(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1)
 
 proc drawText(t: Text; pda: PDA) =
-  const Font = "Serif 8px"
+  const Font = "Serif 8px" # later we take that from style
   var context = pda.darea.createPangoContext
   var layout = pango.newLayout(context)
   var desc = pango.newFontDescription(Font)
   pda.cr.moveTo(t.x1, t.y1)
   layout.setText(t.text)
   layout.setFontDescription(desc)
-  var w, h : int
+  var w, h: int
   layout.getSize(w, h)
-  t.width = w.float / pango.Scale.float
-  t.height = h.float / pango.Scale.float
-  t.p[1] = t.p[0] + (t.width, t.height)
-  let dx = -t.width * (t.gx mod 3).float * 0.5
-  let dy = -t.height * (t.gy mod 3).float * 0.5
+  let width = w.float / pango.Scale.float
+  let height = h.float / pango.Scale.float
+  t.p[1] = t.p[0] + (width, height)
+  let dx = -width * (t.gx mod 3).float * 0.5
+  let dy = -height * (t.gy mod 3).float * 0.5
   pda.cr.moveTo(t.x1 + dx, t.y1 + dy)
   pda.cr.updateLayout(layout)
   pangocairo.showLayout(pda.cr, layout)
@@ -668,12 +662,12 @@ proc drawText(t: Text; pda: PDA) =
     t.isNew = false
     pda.movingObj = nil
   for i in 0 .. 8:
-    let x = t.x1 + t.width * (i mod 3).float * 0.5
-    let y = t.y1 + t.height * (i div 3).float * 0.5
-    t.grabPos[i] = (x + dx, y + dy)
+    let x = t.x1 + width * (i mod 3).float * 0.5
+    let y = t.y1 + height * (i div 3).float * 0.5
+    t.grabPos(i) = (x + dx, y + dy)
 
 proc drawCirc(c: Circ; pda: PDA) =
-  let r = math.hypot(c.x1 - c.x2,  c.y1 - c.y2)
+  let r = math.hypot(c.x1 - c.x2, c.y1 - c.y2)
   pda.cr.newPath
   pda.cr.arc(c.x1, c.y1, r, 0, math.Tau)
 
@@ -695,14 +689,16 @@ proc initDrawGrab(pda: PDA) =
 
 proc drawTextGrab(t: Text; pda: PDA) =
   initDrawGrab(pda)
-  let dx = -t.width * (t.gx mod 3).float * 0.5
-  let dy = -t.height * (t.gy mod 3).float * 0.5
-  pda.cr.rectangle(t.x1 + dx, t.y1 + dy, t.width, t.height)
+  let width = t.p[1].x - t.p[0].x
+  let height = t.p[1].y - t.p[0].y
+  let dx = -width * (t.gx mod 3).float * 0.5
+  let dy = -height * (t.gy mod 3).float * 0.5
+  pda.cr.rectangle(t.x1 + dx, t.y1 + dy, width, height)
   pda.cr.stroke
   for i in 0 .. 8:
-      pda.drawGrabCirc(t.grabPos[i].x, t.grabPos[i].y)
-  
-proc drawLineGrab(l: Line; pda: PDA) =
+    pda.drawGrabCirc(t.grabPos(i).x, t.grabPos(i).y)
+
+proc drawLineGrab(l: Line; pda: PDA) = # TODO: join with drawPathGrab
   initDrawGrab(pda)
   pda.drawGrabCirc(l.x1, l.y1)
   pda.drawGrabCirc(l.x2, l.y2)
@@ -746,7 +742,7 @@ proc drawCircGrab(c: Circ; pda: PDA) =
   initDrawGrab(pda)
   pda.drawGrabCirc(c.x1, c.y1)
   let d = pda.absToScr(GrabDist)
-  let r = math.hypot(c.x1 - c.x2,  c.y1 - c.y2)
+  let r = math.hypot(c.x1 - c.x2, c.y1 - c.y2)
   pda.cr.newPath
   pda.cr.arc(c.x1, c.y1, r + d, 0, math.Tau)
   pda.cr.stroke
@@ -795,25 +791,25 @@ proc drawGroupGrab(r: Group; pda: PDA) =
   pda.cr.rectangle(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1)
   pda.cr.fill
 
-proc sqrDistance(el: Element; x, y: float): float =
+proc sqrDistance(el: Element; xy: V2): float =
   if el of Line:
-    result = sqrDistanceLine(Line(el), x, y)
+    result = sqrDistanceLine(Line(el), xy)
   elif el of Path:
-    result = sqrDistancePath(Path(el), x, y)
+    result = sqrDistancePath(Path(el), xy)
   elif el of Trace:
-    result = sqrDistanceTrace(Trace(el), x, y)
+    result = sqrDistanceTrace(Trace(el), xy)
   elif el of Rect:
-    result = sqrDistanceRect(Rect(el), x, y)
+    result = sqrDistanceRect(Rect(el), xy)
   elif el of Circ:
-    result = sqrDistanceCirc(Circ(el), x, y)
+    result = sqrDistanceCirc(Circ(el), xy)
   elif el of Text:
-    result = sqrDistanceText(Text(el), x, y)
+    result = sqrDistanceText(Text(el), xy)
   elif el of Group:
-    result = sqrDistanceGroup(Group(el), x, y)
+    result = sqrDistanceGroup(Group(el), xy)
 
 # squared distance from query point to
 proc dist(qo: BoxCenter[2, float]; el: L[2, float, Element]): float =
-  sqrDistance(el.l, qo[0], qo[1])
+  sqrDistance(el.l, (qo[0], qo[1]))
 
 proc drawEl(el: RootRef; pda: PDA) =
   if el of Line:
@@ -837,11 +833,9 @@ proc drawElGrab(el: Element; pda: PDA) =
     drawLineGrab(Line(el), pda)
   elif el of Path:
     drawPathGrab(Path(el), pda)
-
   elif el of Trace:
     if styles[el.style.ord].lineWidth < 0.8 * GrabDist:
       drawTraceGrab(Trace(el), pda)
-
   elif el of Rect:
     drawRectGrab(Rect(el), pda)
   elif el of Circ:
@@ -899,17 +893,18 @@ proc draw(pda: PDA) =
       pda.cr.mask(tmp1)
       pda.cr.setSource(tmp1)
       pda.cr.paintWithAlpha(0.7)
-      pda.cr.paintWithAlpha(1.0)#0.7)
+      pda.cr.paintWithAlpha(1.0) #0.7)
       patternDestroy(tmp1)
 
-proc drawingAreaDrawCb(darea: DrawingArea; cr: cairo.Context; width, height: int; this: PDA) =
-  if this.pattern.isNil: return
+proc drawingAreaDrawCb(darea: DrawingArea; cr: cairo.Context; width, height: int; pda: PDA) =
+  if pda.pattern.isNil: return
   var t0 = cpuTime()
-  cr.setSource(this.pattern)
+  cr.setSource(pda.pattern)
   cr.paint
   #echo "CPU time [s] ", cpuTime() - t0
-  if this.selecting:
-    cr.rectangle(this.lastButtonDownPos.x, this.lastButtonDownPos.y, this.zoomRect.x - this.lastButtonDownPos.x, this.zoomRect.y - this.lastButtonDownPos.y)
+  if pda.selecting:
+    cr.rectangle(pda.lastButtonDownPos.x, pda.lastButtonDownPos.y, pda.zoomRect.x - pda.lastButtonDownPos.x, pda.zoomRect.y -
+        pda.lastButtonDownPos.y)
     cr.setSource(SelectRectCol)
     cr.fillPreserve
     cr.setSource(0, 0, 0)
@@ -922,40 +917,39 @@ proc updateVal(adj: PosAdj; d: float) =
   adj.setValue(max(0.0, min(adj.value + d, adj.upper - adj.pageSize)))
   adj.signalHandlerUnblock(adj.handlerID)
 
-proc updateAdjustments(this: PDA; dx, dy: float) =
-  this.hadjustment.setUpper(this.darea.allocatedWidth.float * this.userZoom)
-  this.vadjustment.setUpper(this.darea.allocatedHeight.float * this.userZoom)
-  this.hadjustment.setPageSize(this.darea.allocatedWidth.float)
-  this.vadjustment.setPageSize(this.darea.allocatedHeight.float)
-  updateVal(this.hadjustment, dx)
-  updateVal(this.vadjustment, dy)
+proc updateAdjustments(pda: PDA; dx, dy: float) =
+  pda.hadjustment.setUpper(pda.darea.allocatedWidth.float * pda.userZoom)
+  pda.vadjustment.setUpper(pda.darea.allocatedHeight.float * pda.userZoom)
+  pda.hadjustment.setPageSize(pda.darea.allocatedWidth.float)
+  pda.vadjustment.setPageSize(pda.darea.allocatedHeight.float)
+  updateVal(pda.hadjustment, dx)
+  updateVal(pda.vadjustment, dy)
 
-proc paint(this: PDA; queueDraw = true) =
-  this.cr.save
-  this.cr.translate(this.hadjustment.upper * 0.5 - this.hadjustment.value, # our origin is the center
-    this.vadjustment.upper * 0.5 - this.vadjustment.value)
-  this.cr.scale(this.fullScale * this.userZoom, this.fullScale * this.userZoom)
-  this.cr.translate(-this.dataX - this.dataWidth * 0.5, -this.dataY - this.dataHeight * 0.5)
-  draw(this)
-  this.cr.restore
+proc paint(pda: PDA; queueDraw = true) =
+  pda.cr.save
+  pda.cr.translate(pda.hadjustment.upper * 0.5 - pda.hadjustment.value, # our origin is the center
+    pda.vadjustment.upper * 0.5 - pda.vadjustment.value)
+  pda.cr.scale(pda.fullScale * pda.userZoom, pda.fullScale * pda.userZoom)
+  pda.cr.translate(-pda.dataX - pda.dataWidth * 0.5, -pda.dataY - pda.dataHeight * 0.5)
+  draw(pda)
+  pda.cr.restore
   if queueDraw:
-    this.darea.queueDraw
+    pda.darea.queueDraw
 
-proc dareaConfigureCallback(darea: DrawingArea; width, height: int; this: PDA) =
-  this.fullScale = min(this.darea.allocatedWidth.float / this.dataWidth, this.darea.allocatedHeight.float / this.dataHeight)
-  if this.surf != nil:
-    destroy(this.surf) # manually destroy surface -- GC would do it for us, but GC is slow...
+proc dareaConfigureCallback(darea: DrawingArea; width, height: int; pda: PDA) =
+  pda.fullScale = min(pda.darea.allocatedWidth.float / pda.dataWidth, pda.darea.allocatedHeight.float / pda.dataHeight)
+  if pda.surf != nil:
+    destroy(pda.surf) # manually destroy surface -- GC would do it for us, but GC is slow...
   let s = darea.getNative.getSurface
-  this.surf = createSimilarSurface(s, Content.color,
-      this.darea.allocatedWidth, this.darea.allocatedHeight)
-  if this.pattern != nil:
-    patternDestroy(this.pattern)
-  if this.cr != nil:
-    destroy(this.cr)
-  this.pattern = patternCreateForSurface(this.surf) # pattern now owns the surface!
-  this.cr = newContext(this.surf) # this function references target!
-  updateAdjustments(this, 0, 0)
-  this.paint(false)
+  pda.surf = createSimilarSurface(s, Content.color, pda.darea.allocatedWidth, pda.darea.allocatedHeight)
+  if pda.pattern != nil:
+    patternDestroy(pda.pattern)
+  if pda.cr != nil:
+    destroy(pda.cr)
+  pda.pattern = patternCreateForSurface(pda.surf) # pattern now owns the surface!
+  pda.cr = newContext(pda.surf) # pda function references target!
+  updateAdjustments(pda, 0, 0)
+  pda.paint(false)
 
 proc hscrollbarSizeAllocateCallback(p: Paintable; pda: PDA) =
   let w = p.getIntrinsicWidth
@@ -964,7 +958,7 @@ proc hscrollbarSizeAllocateCallback(p: Paintable; pda: PDA) =
   if pda.oldSizeX != 0: # this fix is not exact, as fullScale can ...
     updateVal(pda.hadjustment, (w - pda.oldSizeX).float * 0.5)
   pda.oldSizeX = w
-  
+
 proc vscrollbarSizeAllocateCallback(p: Paintable; pda: PDA) =
   let h = p.getIntrinsicHeight
   pda.vadjustment.setUpper(h.float * pda.userZoom)
@@ -973,60 +967,58 @@ proc vscrollbarSizeAllocateCallback(p: Paintable; pda: PDA) =
     updateVal(pda.vadjustment, (h - pda.oldSizeY).float * 0.5)
   pda.oldSizeY = h
 
-proc updateAdjustmentsAndPaint(this: PDA; dx, dy: float) =
-  this.updateAdjustments(dx, dy)
-  this.paint
+proc updateAdjustmentsAndPaint(pda: PDA; dx, dy: float) =
+  pda.updateAdjustments(dx, dy)
+  pda.paint
 
-proc onMotion(c: EventControllerLegacy; e: Event; this: PDA): bool =
-  let x = this.legEvX
-  let y = this.legEvY
-  let (a, b) = this.getUserCoordinates((x, y))
+proc onMotion(c: EventControllerLegacy; e: Event; pda: PDA): bool =
+  let x = pda.legEvXY.x
+  let y = pda.legEvXY.y
+  let (a, b) = pda.getUserCoordinates(pda.legEvXY)
   #echo "::: ", a, " ", b
 
-  if this.uact == dragging and this.movingObj != nil:
-    this.lastMousePos = (x, y)
-    discard this.move
-    paint(this)
+  if pda.uact == dragging and pda.movingObj != nil:
+    pda.lastMousePos = pda.legEvXY
+    discard pda.move
+    paint(pda)
 
-  if math.hypot(x - this.lastButtonDownPos.x, y - this.lastButtonDownPos.y) > 2:
-    if this.uact == lmbdv:
-      this.uact = zooming
-    elif this.uact == lmbdo:
-      this.uact = dragging#selecting
-      assert this.movingObj != nil
+  if math.hypot(x - pda.lastButtonDownPos.x, y - pda.lastButtonDownPos.y) > 2:
+    if pda.uact == lmbdv:
+      pda.uact = zooming
+    elif pda.uact == lmbdo:
+      pda.uact = dragging #selecting
+      assert pda.movingObj != nil
       var el: L[2, float, Element]
-      var l = this.movingObj
-      el = (boxEl(l, this), l)
-      this.tree.delete(el)
+      var l = pda.movingObj
+      el = (boxEl(l, pda), l)
+      pda.tree.delete(el)
 
-  var el: Element = this.tree.findNearest(BoxCenter[2, float]([a, b]), dist)[1]
+  var el: Element = pda.tree.findNearest(BoxCenter[2, float]([a, b]), dist)[1]
   if el != nil:
-    if el of Circ:
-      echo "Circ"
-    elif el of Line:
-      echo "Line"
-    if sqrDistance(el, a, b) < (this.absToScr(GrabDist)) ^ 2:
-      this.hover = el
+    if sqrDistance(el, (a, b)) < (pda.absToScr(GrabDist)) ^ 2:
+      pda.hover = el
       el.hover = true
     else:
-      this.hover = nil
+      pda.hover = nil
 
-  if this.uact == selecting:#state.contains(button1): # selecting
-    this.selecting = true
-    this.zoomRect = (x, y)
-    this.darea.queueDraw#Area(0, 0, this.darea.allocatedWidth, this.darea.allocatedHeight)
-  elif false:#button2 in state: # panning
-    this.updateAdjustmentsAndPaint(this.lastMousePos.x - x, this.lastMousePos.y - y)
-  this.lastMousePos = (x, y)
-  if this.points.len > 0 or this.hover != this.lastHover:
-    if this.points.len == 1:
-      let p = this.roundToGrid((a, b))
-      if this.movingObj of Path:
-        this.movingObj.p[^1] = p
+  if pda.uact == selecting: #state.contains(button1): # selecting
+    pda.selecting = true
+    pda.zoomRect = (x, y)
+    pda.darea.queueDraw #Area(0, 0, pda.darea.allocatedWidth, pda.darea.allocatedHeight)
+  elif false: #button2 in state: # panning
+    pda.updateAdjustmentsAndPaint(pda.lastMousePos.x - x, pda.lastMousePos.y - y)
+  pda.lastMousePos = (x, y)
+  if pda.points.len > 0 or pda.hover != pda.lastHover:
+    if pda.points.len == 1:
+      let p = pda.roundToGrid((a, b))
+      echo "aaa", pda.movingObj == nil
+      if pda.movingObj of Path:
+        pda.movingObj.p[^1] = p
       else:
-        this.movingObj.p[1] = p
-    paint(this)
-    this.lastHover = this.hover
+        pda.movingObj.p[1] = p
+      echo "bbb"
+    paint(pda)
+    pda.lastHover = pda.hover
   return gdk4.EVENT_STOP
 
 # zooming with mouse wheel -- data near mouse pointer should not move if possible!
@@ -1035,171 +1027,192 @@ proc onMotion(c: EventControllerLegacy; e: Event; this: PDA): bool =
 # In other words, this is the delta-move d of a point at position P from zooming:
 # d = newPos - P = P * scale - P = P * (z/z0) - P = P * (z/z0 - 1). We have to compensate for this d.
 
-proc scrollEvent(c: EventControllerLegacy; event: ScrollEvent; this: PDA): bool =
-  assert  event.getEventType == EventType.scroll
-  let z0 = this.userZoom
+proc scrollEvent(c: EventControllerLegacy; event: ScrollEvent; pda: PDA): bool =
+  assert event.getEventType == EventType.scroll
+  let z0 = pda.userZoom
   case getDirection(event)
   of ScrollDirection.up:
-    this.userZoom *= ZoomFactorMouseWheel
+    pda.userZoom *= ZoomFactorMouseWheel
   of ScrollDirection.down:
-    this.userZoom /= ZoomFactorMouseWheel
-    if this.userZoom < 1:
-      this.userZoom = 1
+    pda.userZoom /= ZoomFactorMouseWheel
+    if pda.userZoom < 1:
+      pda.userZoom = 1
   else:
     return gdk4.EVENT_PROPAGATE
-  if this.zoomNearMousepointer:
-    let x = this.legEvX
-    let y = this.legEvY
-    this.updateAdjustmentsAndPaint((this.hadjustment.value + x) * (this.userZoom / z0 - 1),
-      (this.vadjustment.value + y) * (this.userZoom / z0 - 1))
+  if pda.zoomNearMousepointer:
+    let x = pda.legEvXY.x
+    let y = pda.legEvXY.y
+    pda.updateAdjustmentsAndPaint((pda.hadjustment.value + x) * (pda.userZoom / z0 - 1),
+      (pda.vadjustment.value + y) * (pda.userZoom / z0 - 1))
   else: # zoom to center
-    this.updateAdjustmentsAndPaint((this.hadjustment.value +
-        this.darea.allocatedWidth.float * 0.5) * (this.userZoom / z0 - 1),
-        (this.vadjustment.value + this.darea.allocatedHeight.float * 0.5) * (this.userZoom / z0 - 1))
+    pda.updateAdjustmentsAndPaint((pda.hadjustment.value +
+        pda.darea.allocatedWidth.float * 0.5) * (pda.userZoom / z0 - 1),
+        (pda.vadjustment.value + pda.darea.allocatedHeight.float * 0.5) * (pda.userZoom / z0 - 1))
   return gdk4.EVENT_STOP
 
-proc buttonPressEvent(c: EventControllerLegacy; e: Event; this: PDA): bool =
-  let x = this.legEvX
-  let y = this.legEvY
-  this.lastMousePos = (x, y)
-  this.lastButtonDownPos = (x, y)
-  (this.lastButtonDownPosUser.x, this.lastButtonDownPosUser.y) = this.getUserCoordinates((x, y))
-  if this.hover.isNil:
-    this.uact = lmbdv
+proc buttonPressEvent(c: EventControllerLegacy; e: Event; pda: PDA): bool =
+  pda.lastMousePos = pda.legEvXY
+  pda.lastButtonDownPos = pda.legEvXY
+  (pda.lastButtonDownPosUser.x, pda.lastButtonDownPosUser.y) = pda.getUserCoordinates(pda.legEvXY)
+  if pda.uact == constructing:
+    discard
+  elif pda.hover.isNil:
+    pda.uact = lmbdv
   else:
-    this.uact = lmbdo
-    this.movingObj = this.hover
+    pda.uact = lmbdo
+    pda.movingObj = pda.hover
   return gdk4.EVENT_STOP
 
 # zoom into selected rectangle and center it
 # math: we first center the selection rectangle, and then compensate for translation due to scale
 
-proc buttonReleaseEvent(c: EventControllerLegacy; event: ButtonEvent; this: PDA): bool =
-  let x = this.legEvX
-  let y = this.legEvY
+proc buttonReleaseEvent(c: EventControllerLegacy; event: ButtonEvent; pda: PDA): bool =
+  echo pda.uact
+  let x = pda.legEvXY.x
+  let y = pda.legEvXY.y
   let xy = [x, y]
-  if this.uact == UserAction.lmbdv and this.hover == nil:# and this.selected.lines.len > 0:
+  if pda.uact == UserAction.lmbdv and pda.hover == nil: # and pda.selected.lines.len > 0:
     var h = false
-    for el in this.tree.allElements(nil):#pda.movingObj):
+    for el in pda.tree.allElements(nil): #pda.movingObj):
       if el.selected: h = true
       el.selected = false
     if h:
-      paint(this)
-      this.uact = UserAction.none
+      paint(pda)
+      pda.uact = UserAction.none
       return
-  if this.uact == UserAction.lmbdo and this.hover != nil:
-    this.movingObj = nil
-    this.uact = UserAction.none
-    if this.hover of Text:
-      let olddx = -this.hover.width * (this.hover.gx mod 3).float * 0.5
-      let olddy = -this.hover.height * (this.hover.gy mod 3).float * 0.5
+  if pda.uact == UserAction.lmbdo and pda.hover != nil:
+    pda.movingObj = nil
+    ###pda.uact = UserAction.none
+    if pda.hover of Text:
+      let width = pda.hover.p[1].x - pda.hover.p[0].x
+      let height = pda.hover.p[1].y - pda.hover.p[0].y
+      let olddx = -width * (pda.hover.gx mod 3).float * 0.5
+      let olddy = -height * (pda.hover.gy mod 3).float * 0.5
       for i in 0 .. 8:
-        let (x, y) = this.getUserCoordinates((x, y))
-        if (x - this.hover.grabPos[i].x) ^ 2 + (y - this.hover.grabPos[i].y) ^ 2 < this.absToScr(GrabDist) ^ 2:
+        let (x, y) = pda.getUserCoordinates((x, y))
+        if (x - pda.hover.grabPos(i).x) ^ 2 + (y - pda.hover.grabPos(i).y) ^ 2 < pda.absToScr(GrabDist) ^ 2:
           var el: L[2, float, Element]
-          el = (boxEl(this.hover, this), this.hover)
-          discard this.tree.delete(el)
-          this.hover.gx = i mod 3
-          this.hover.gy = i div 3
-          var dx = -this.hover.width * (this.hover.gx mod 3).float * 0.5
-          var dy = -this.hover.height * (this.hover.gy mod 3).float * 0.5
-          var dxdy = this.roundToGrid((olddx - dx, olddy - dy))
-          this.hover.p[0] += dxdy
-          this.hover.p[1] += dxdy
-          this.movingObj = this.hover
-          this.hover.isNew = true
-          paint(this)
+          el = (boxEl(pda.hover, pda), pda.hover)
+          discard pda.tree.delete(el)
+          pda.hover.gx = i mod 3
+          pda.hover.gy = i div 3
+          var dx = -width * (pda.hover.gx mod 3).float * 0.5
+          var dy = -height * (pda.hover.gy mod 3).float * 0.5
+          var dxdy = pda.roundToGrid((olddx - dx, olddy - dy))
+          pda.hover.p[0] += dxdy
+          pda.hover.p[1] += dxdy
+          pda.movingObj = pda.hover
+          pda.hover.isNew = true
+          paint(pda)
           break
-    for l in this.tree.allElements(nil):
-      if l == this.hover:
+    var ret = false
+    for l in pda.tree.allElements(nil):
+      if l == pda.hover:
+        if not l.selected: ret = true
         l.selected = true
-    return
-  if this.movingObj != nil and this.uact == dragging:
+    ###return
+    if ret:
+      pda.uact = UserAction.none
+      return
+  if pda.movingObj != nil and pda.uact == dragging:
     var el: L[2, float, Element]
-    var l = this.movingObj
-    el = (boxEl(l, this), l)
-    this.tree.insert(el)
-    this.uact = UserAction.none
-    return
-  if this.hover != nil:
-    return
-  #var uc = this.getUserCoordinates(xy) # does not compile
-  let uc = this.getUserCoordinates((xy[0], xy[1]))
-  let ucr = this.roundToGrid(uc)
-  if this.uact == dragging:
-    this.uact = UserAction.none
-  if this.uact in {lmbdo, lmbdv}:
-    this.points.add(ucr)
+    var l = pda.movingObj
+    el = (boxEl(l, pda), l)
+    pda.tree.insert(el)
+    pda.uact = UserAction.none
+    ###return
+  #if pda.hover != nil:
+  #  return
+
+  #if pda.hover != nil and not pda.hover.selected:
+  #  return
+
+  ###if pda.uact != constructing and pda.hover != nil:
+   ### return
+
+  #var uc = pda.getUserCoordinates(xy) # does not compile
+  let uc = pda.getUserCoordinates((xy[0], xy[1]))
+  let ucr = pda.roundToGrid(uc)
+  if pda.uact == dragging:
+    pda.uact = UserAction.none
+  if pda.uact in {lmbdo, lmbdv, constructing}:
+    pda.points.add(ucr)
   var needsRefresh = false
-  if this.points.len == 1:
+  if pda.points.len == 1:
     var l: Element
-    if this.activeShape == Shapes.line:
-      l = newLine(this.points[0], this.points[0])
-    elif this.activeShape == Shapes.path:
-      l = newPath(this.points[0], this.points[0])
+    if pda.activeShape == Shapes.line:
+      l = newLine(pda.points[0], pda.points[0])
+    elif pda.activeShape == Shapes.path:
+      l = newPath(pda.points[0], pda.points[0])
       echo "newpath"
-    elif this.activeShape == Shapes.trace:
+    elif pda.activeShape == Shapes.trace:
       #echo "newtrace"
-      l = newTrace(this.points[0], this.points[0])
-    elif this.activeShape == Shapes.rect:
-      l = newRect(this.points[0], this.points[0])
-    elif this.activeShape == Shapes.circ:
-      l = newCirc(this.points[0], this.points[0])
-    elif this.activeShape == Shapes.text:
-      l = newText(this.points[0], this.points[0], "|")
-      this.entry.setText("")
-      this.entry.setPlaceholderText("New Text")
-      discard this.entry.grabFocus
-      this.points.setLen(0)
+      l = newTrace(pda.points[0], pda.points[0])
+    elif pda.activeShape == Shapes.rect:
+      l = newRect(pda.points[0], pda.points[0])
+    elif pda.activeShape == Shapes.circ:
+      l = newCirc(pda.points[0], pda.points[0])
+    elif pda.activeShape == Shapes.text:
+      l = newText(pda.points[0], pda.points[0], "|")
+      pda.entry.setText("")
+      pda.entry.setPlaceholderText("New Text")
+      discard pda.entry.grabFocus
+      pda.points.setLen(0)
       needsRefresh = true
-    l.style = Styles(this.cbtStyle.getActive)
-    this.movingObj = l
-  if this.points.len == 2:
-    let l = this.movingObj
+    l.style = Styles(pda.cbtStyle.getActive)
+    pda.movingObj = l
+    if pda.points.len == 1:
+      pda.uact = constructing
+  if pda.points.len == 2:
+    let l = pda.movingObj
     if l of Path:
-      if this.points[0] == this.points[1]:
+      if pda.points[0] == pda.points[1]:
         l.p.setLen(l.p.len - 1)
-        this.movingObj = nil
-        var el: L[2, float, Element] = (boxEl(l, this), l)
-        this.tree.insert(el)
-        this.points.setLen(0)
+        pda.movingObj = nil
+        var el: L[2, float, Element] = (boxEl(l, pda), l)
+        pda.tree.insert(el)
+        pda.points.setLen(0)
+        echo "futch"
+        pda.uact = UserAction.none
       else:
-        l.p.add(this.points[0])
-        this.points[0] = this.points[1]
-        this.points.setLen(1)
+        l.p.add(pda.points[0])
+        pda.points[0] = pda.points[1]
+        pda.points.setLen(1)
+        pda.uact = constructing
     else:
-      this.movingObj = nil
-      var el: L[2, float, Element] = (boxEl(l, this), l)
-      this.tree.insert(el)
-      this.points.setLen(0)
+      pda.movingObj = nil
+      var el: L[2, float, Element] = (boxEl(l, pda), l)
+      pda.tree.insert(el)
+      pda.points.setLen(0)
+      pda.uact = UserAction.none
   if needsRefresh:
-    paint(this)
+    paint(pda)
   return gdk4.EVENT_PROPAGATE
- 
-proc distributeLegacyEvent(c: EventControllerLegacy; e: Event; this: PDA): bool =
+
+proc distributeLegacyEvent(c: EventControllerLegacy; e: Event; pda: PDA): bool =
   let et = e.getEventType
   case et
   of EventType.buttonPress, buttonRelease, motionNotify:
     var nx, ny: float
-    let widget = this.darea
+    let widget = pda.darea
     var (x, y) = e.getPosition
     var native: gtk4.Native = widget.getNative
-    native.getSurfaceTransform(nx, ny)  
+    native.getSurfaceTransform(nx, ny)
     let toplevel = widget.getRootWidget
     discard translateCoordinates(toplevel, widget, x - nx, y - ny, x, y) # TODO add getRootWindow()
-    this.legEvX = x
-    this.legEvY = y
+    pda.legEvXY = (x, y)
   else: discard
 
   case e.getEventType
   of EventType.buttonPress:
-    return buttonPressEvent(c, e, this)
+    return buttonPressEvent(c, e, pda)
   of EventType.buttonRelease:
-    return buttonReleaseEvent(c, cast[ButtonEvent](e), this)
+    return buttonReleaseEvent(c, cast[ButtonEvent](e), pda)
+    #return buttonReleaseEvent(c, ButtonEvent(e), pda) # runtime issue
   of EventType.scroll:
-    return scrollEvent(c, cast[ScrollEvent](e), this)
+    return scrollEvent(c, cast[ScrollEvent](e), pda)
   of EventType.motionNotify:
-    return onMotion(c, e, this)
+    return onMotion(c, e, pda)
   else:
     discard
 
@@ -1215,6 +1228,10 @@ proc entryActivate(entry: Entry; pda: PDA) =
     Text(pda.movingObj).text = entry.text
     Text(pda.movingObj).isNew = true
     pda.paint
+
+proc gridToggled(b: ToggleButton; pda: PDA) =
+  let i = b.getActive.int
+  pda.activeGrid = (pda.grid[i], pda.grid[i + 2])
 
 proc worldActivate(entry: Entry; pda: PDA) =
   var
@@ -1334,11 +1351,11 @@ proc shapeChanged(cbt: ComboBoxText; pda: PDA) =
 proc styleChanged(cbt: ComboBoxText) =
   echo cbt.getActiveText
 
-proc onAdjustmentEvent(this: PosAdj; pda: PDA) =
+proc onAdjustmentEvent(adj: PosAdj; pda: PDA) =
   pda.paint
 
-proc onSetLineWidth(this: SpinButton; pda: PDA) =
-  pda.lineWidth = this.value
+proc onSetLineWidth(b: SpinButton; pda: PDA) =
+  pda.lineWidth = b.value
 
 proc newPDA(window: ApplicationWindow): PDA =
   result = newGrid(PDA)
@@ -1356,6 +1373,8 @@ proc newPDA(window: ApplicationWindow): PDA =
   result.zoomNearMousepointer = ZoomNearMousepointer # mouse wheel zooming
   result.userZoom = 1.0
   result.grid = DefaultGrid
+  result.activeGrid.x = DefaultGrid[0]
+  result.activeGrid.y = DefaultGrid[2]
   result.hadjustment = newPosAdj()
   result.hadjustment.handlerID = result.hadjustment.connect("value-changed", onAdjustmentEvent, result)
   result.vadjustment = newPosAdj()
@@ -1374,7 +1393,7 @@ proc newPDA(window: ApplicationWindow): PDA =
   result.headerbar = newHeaderBar()
 
   result.topbox = newBox(Orientation.horizontal, 0)
-  result.topbox.append(newLabel("test0"))
+  #result.topbox.append(newLabel("test0"))
   let adj = newAdjustment(0.2, 0, 1, 0.1, 0.1, 0) # value, min, max...
   let sb = newSpinButton(adj, 1, 3)
   sb.connect("value-changed", onSetLineWidth, result)
@@ -1423,7 +1442,11 @@ proc newPDA(window: ApplicationWindow): PDA =
   grid.connect("activate", gridActivate, result)
   let gridLabel = newLabel()
   gridLabel.setMarkup("<big>\u{25A6}</big>")
-  result.topbox.append(gridLabel)
+  let gridButton = newToggleButton()
+  gridButton.connect("toggled", gridToggled, result)
+  gridButton.setChild(gridLabel)
+
+  result.topbox.append(gridButton)
   result.topbox.append(grid)
   result.gridw = grid
 
@@ -1474,24 +1497,25 @@ proc newPDA(window: ApplicationWindow): PDA =
   result.botbox.append(label)
   result.attach(result.botbox, 0, 2, 2, 1)
 
-proc appStartup(app: Application) =
+proc startup(app: Application) =
   echo "appStartup"
 
-proc appActivate(app: Application) =
-  let window = newApplicationWindow(app)
-  window.title = "Drawing example"
-  window.defaultSize = (2400, 1800)
+proc activate(app: Application) =
+  let window = app.newApplicationWindow
+  window.title = "Simple design tool"
+  window.defaultSize = DefaultWindowSize
   let pda = newPDA(window)
   (pda.dataX, pda.dataY, pda.dataWidth, pda.dataHeight) = DefaultWorldRange
   window.setChild(pda)
   window.setTitlebar(pda.headerbar) # before window.show()
-  show(window)
+  window.show
 
-proc newDisplay*() =
+proc newDisplay =
   let app = newApplication("org.gtk.example")
-  connect(app, "startup", appStartup)
-  connect(app, "activate", appActivate)
-  discard run(app)
+  app.connect("startup", startup)
+  app.connect("activate", activate)
+  let status = app.run
+  quit(status)
 
-when isMainModule: # 1497 lines
+when isMainModule: # 1520 lines
   newDisplay()
