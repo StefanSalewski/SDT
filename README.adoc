@@ -143,6 +143,13 @@ A click with the LMB on an element selects it -- later we will need this selecti
 As the mouse click is absorbed for selection, we can not start a line on an existing object. Current solution is that
 first click selects the element, and second click starts the new line. Maybe later we will find a better solution?
 
+=== Object capture mode
+
+Additional to snap coordinates to grid points, we will also support
+capture to existing objects. For lines, start point of new line segments
+may snap to existing lines. A wide snap range may make it possible to
+start new line on existing line ends, without having to select the old line first.
+
 == Styles
 
 We have decided to avoid the use of multiple independent attributes for objects
@@ -179,3 +186,53 @@ only for lines and circles.
 Later we will get layer support. We will be able to look layers, make layers invisible
 and move objects from one layer to a different one.
 
+== Command entry
+
+We will have a command entry widget. A command like
+"Line x1 y1 x2 y2" will create a new line. This is very useful for creating
+pins and pads. For Pads the command is "pad x1 y1 x2 y2 dx dy N Num Name".
+This will create N pads each with a displacement of dx, dy, and increased pad number.
+Creating pins will work similar.
+
+== Schematic Mode
+
+For Schematic mode grid size should be 10, so that length of pins is 20 or 30.
+When we draw a pin, its get a number and a label text automatically aligned.
+By default we can only select the pin itself, not the attached strings. But we can detach
+the strings, edit or translate them, and later reattach.
+
+== Attached text attributes
+
+We can attach text attributes to all objects. WE create the object, the text object, select
+both and then choose "attach text" from menu. Som eobjects has attached text by default,
+i.e. Pins and pads has a number and a name attached. Arrached text can not be grabbed or selected
+directly, it moves with the parent object. We can select an object and choose "dettach text" from menu
+to dettach all text so that we can edit it.
+
+== Text sizes
+
+Text size is given in points, that is 1/72 inch. When we zoom in, text size increases in the same way
+as length or width ol line segments would increase. The question is how textsize will
+behave when we increase the sheet size, e.g. when we draw a schematic and have to increse the sheet
+to add more components. WE will have too types of text -- one will preserve size, the other will
+srink in the same way as all other elements will shrink when we increase sheet size.
+
+In PCB mode, text annotations of pads or pins will have a special size. Pad text will adapt to pad size,
+and text attached to pins (number and name) will match pin size.
+
+== Command entry
+
+We have a GtkText widget where we can enter command, e.g. to create pads or pins.
+
+=== Pad entry
+
+We enter a command like
+
+x1, y1, x2, y2, r, num, name, dx, dy, n
+
+x1, y1, x2, y2 are the two opposite corners of the pad, and r is the radius of the pad corners.
+Entering r is currently necessary, but that value is ignored for now.
+Num is the pad number, name is the name of the pad. Name is an optional string containing beginning with
+a letter. dx and dy are an displacement for the next pad, and n tells how many pads should be created.
+Pads are numbered by inceasing num. We can put a '-' in front of num, then num is decreased instead.
+ 
