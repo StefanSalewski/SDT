@@ -250,5 +250,5 @@ to indicate a oval copper area, which provides more mechanically stability. Hole
 by default -- current idea is that for multi-layer boards copper rings are added when traces start or end at the hole
 position. In hole mode holes can be entered with the mouse by clicking on a location -- a fixed copper diameter and drill diameter
 is used in this case.  Currently the hole command has to start with "hole ", a plus sign or at least one whitespace due to a strscan.scanf()
-restriction (no optional capturing parameter support).
+restriction (no optional capturing parameter support). test
  
