@@ -1,6 +1,6 @@
 = Simple Drawing Tool
 (c) Stefan Salewski 2021                                     
-//Version 0.1 AUG 2021
+//Version 0.1 SEP 2021
 :experimental:
 :imagesdir: http://ssalewski.de/tmp
 :source-highlighter: pygments
@@ -235,4 +235,20 @@ Entering r is currently necessary, but that value is ignored for now.
 Num is the pad number, name is the name of the pad. Name is an optional string containing beginning with
 a letter. dx and dy are an displacement for the next pad, and n tells how many pads should be created.
 Pads are numbered by inceasing num. We can put a '-' in front of num, then num is decreased instead.
+
+=== Hole entry
+
+Pins in PCB mode are currently called holes.
+You can enter a command to create some holes like
+
+hole x y dia drill num  name dx dy n
+
+x/y position, copper and drill diameter, a number and a name. And when creating
+more than one hole the x, y displacement and the number of holes. The leading hole
+string is not necessary when the hole mode is already active. The x or y values can start with a plus sign
+to indicate a oval copper area, which provides more mechanically stability. Holes get a copper ring on the solder side
+by default -- current idea is that for multi-layer boards copper rings are added when traces start or end at the hole
+position. In hole mode holes can be entered with the mouse by clicking on a location -- a fixed copper diameter and drill diameter
+is used in this case.  Currently the hole command has to start with "hole ", a plus sign or at least one whitespace due to a strscan.scanf()
+restriction (no optional capturing parameter support).
  
