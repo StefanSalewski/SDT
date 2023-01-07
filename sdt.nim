@@ -7,19 +7,21 @@
 #
 # Main goal of this tool is to make fun using it.
 #
-# (c) S. Salewski 2020, 2021
+# (c) S. Salewski 2020, 2021, 2022
 # License MIT
-# v0.1 2021-OCT-25
+# v0.1 2022-MAR-19
 
 import std/[times, parseutils, strutils, strformat, strscans, json, macros]#, json, jsonutils]
 #import yaml/serialization, streams
 
+import std/tables
 from std/math import round, floor, `^`, `mod`
 from std/sugar import `=>`
 from std/sequtils import mapIt, applyIt, filter
 import gintro/[gtk4, gdk4, glib, gobject, gio, cairo, pango, pangocairo]
 import rtree
 import salewski, minmax #xpairs
+import layers
 
 const # make config option later
   HoleDia = 10
@@ -28,6 +30,7 @@ const # make config option later
 const
   ### SchematicGrid = 10 # base unit in schematic mode, pin length should be 20 or 30
   PinHotEnd = 2.5
+  JunctionRadius = 2.0
 
 const
   ZoomFactorMouseWheel = 1.1
@@ -37,7 +40,8 @@ const
 
 const
   DefaultWindowSize = (2400, 1800)
-  DefaultWorldRange = [0.0, 0, 600, 400]
+  #DefaultWorldRange = [0.0, 0, 600, 400]
+  DefaultWorldRange = [-50.0, -50, 100, 100]
   DefaultGrid = [100.0, 10, 100, 10]
   HairLineWidth = 0.2 # mm
   ThinHairLineWidth = 0.1 # mm
@@ -45,6 +49,26 @@ const
 const
   GrabDist = 1.5 # mm
   DefaultLineWidth = 0.2 # mm
+
+
+
+
+
+
+# the RMB context sensitive popup menu
+const RmbMenuData = """
+  <interface>
+    <menu id="menuModel">
+      <section>
+        <item>
+          <attribute name="label">Delete</attribute>
+          <attribute name="action">win.delete</attribute>
+        </item>
+      </section>
+    </menu>
+  </interface>"""
+
+
 
 const useNewDelMenuData = """
   <interface>
@@ -84,9 +108,27 @@ const menuData = """
           <attribute name="action">win.save-group</attribute>
         </item>
         <item>
+          <attribute name="label">Save All</attribute>
+          <attribute name="action">win.save-all</attribute>
+        </item>
+        <item>
+          <attribute name="label">Open</attribute>
+          <attribute name="action">win.open</attribute>
+        </item>
+        <item>
           <attribute name="label">Load Group</attribute>
           <attribute name="action">win.load-group</attribute>
         </item>
+        <item>
+          <attribute name="label">Create Footprint</attribute>
+          <attribute name="action">win.create-footprint</attribute>
+        </item>
+
+        <item>
+          <attribute name="label">Create PCB</attribute>
+          <attribute name="action">win.create-pcb</attribute>
+        </item>
+
         <item>
           <attribute name="label">Detach Text</attribute>
           <attribute name="action">win.detach-text</attribute>
@@ -163,7 +205,11 @@ type
 
 type
   Shapes {.pure.} = enum
-    line, rect, pad, hole, circ, text, trace, path, pin, attr
+    line, rect, pad, hole, circ, text, trace, path, pin, attr, net
+
+type
+  Layers {.pure.} = enum # will become user extendable
+    line, rect, pad, hole, circ, text, trace, path, attr, net, pin
 
 type
   LineCaps {.pure.} = enum
@@ -175,7 +221,7 @@ type
 
 type
   Styles {.pure.} = enum
-    medium, thin, thick, fat, pin, sym, pad, hole, none
+    medium, silk, thin, thick, fat, pin, sym, pad, hole, net, none
 
 type
   LineWidths {.pure.} = enum
@@ -205,10 +251,11 @@ const
   XColorValues = [CVGray, CvGray, CvWhite, CvBlack, CvRed, CvBlue, CvBlue, CvBlue, CvRed]
 
 # we could use the enums as indices directly, but later we do user extent the style set...
-var styles: array[8, Style]
+var styles: array[10, Style]
 #for s in mitems(styles):
 #  s.textSize = 16
 styles[Styles.medium.ord] = Style(lineWidth: 1.0, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (0.0, 0.0, 1.0, 1.0), textSize: 16)
+styles[Styles.silk.ord] = Style(lineWidth: 0.2, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (0.0, 0.8, 0.0, 1.0))
 styles[Styles.thin.ord] = Style(lineWidth: 0.5, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (1.0, 0.0, 0.0, 1.0))
 styles[Styles.thick.ord] = Style(lineWidth: 1.5, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (0.0, 1.0, 0.0, 1.0))
 styles[Styles.fat.ord] = Style(lineWidth: 4.0, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (1.0, 0.0, 0.0, 1.0))
@@ -216,14 +263,35 @@ styles[Styles.pin.ord] = Style(lineWidth: 1.0, lineCap: LineCap.round, lineJoin:
 styles[Styles.sym.ord] = Style(lineWidth: 1.0, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (0.0, 0.0, 1.0, 1.0), xcolor: (1.0, 0.0, 0.0, 1.0), relSize: true)
 styles[Styles.pad.ord] = Style(lineWidth: 0.0, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (0.0, 0.0, 1.0, 1.0), xcolor: (1.0, 1.0, 1.0, 1.0))
 styles[Styles.hole.ord] = Style(lineWidth: 0.0, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (0.0, 0.0, 1.0, 1.0), xcolor: (1.0, 1.0, 1.0, 1.0))
+styles[Styles.net.ord] = Style(lineWidth: 1.0, lineCap: LineCap.round, lineJoin: LineJoin.miter, color: (1.0, 1.0, 0.0, 1.0), xcolor: (1.0, 1.0, 1.0, 1.0))
 #for s in mitems(styles):
 #  s.textSize = 16
+
+const
+  MaxNumAttributes = 12
+
+type
+  AttrTuple = tuple
+    name: ComboBoxText#WithEntry
+    nameVis: CheckButton
+    text: Entry
+    textVis: CheckButton
 
 type
   V2 = array[2, float]
 
 type
+  ConMark = CountTable[V2]
+
+type
   Grid = array[4, float] # major x, minor x, major y, minor y
+
+
+proc toStrVal(s: string): Value =
+  let gtype = typeFromName("gchararray")
+  discard init(result, gtype)
+  setString(result, s)
+
 
 #proc sort(a, b: var float) =
 
@@ -243,7 +311,23 @@ proc jecho(x: varargs[string, `$`]) =
   stdout.write('\n')
   stdout.flushfile
 
+# [1, 4, 4, 2, 5, 5, 5, 1] ==> [1, 4, 2, 5, 1]
+proc deTwin(s: var seq[V2]) =
+  if s.len < 2:
+    return
+  var i, d: int # d is the position where we copy the elements that we want to keep
+  while i < s.high:
+    inc(i)
+    if s[d] != s[i]:
+      inc(d)
+      s[d] = s[i]
+  s.setLen(d + 1)
+
 ### helper procs for strscan module
+proc parseToSep(input: string; name: var string; start: int; seps: set[char] = {' ',',',';','\t'}): int =
+  while start + result < input.len and input[start + result] notin {' ',',',';','\t'}:
+    inc(result)
+  name = input[0 .. result - 1]
 
 proc sep(input: string; start: int; seps: set[char] = {' ',',',';'}): int =
   while start + result < input.len and input[start + result] in {' ','\t'}:
@@ -352,6 +436,7 @@ const
 
 type
   Element = ref object of RootRef
+    layer: int
     style: Styles
     p: seq[V2]
     at: seq[Text] # attached text
@@ -363,6 +448,8 @@ type
 
 # type
   Text = ref object of Element
+    name, val: string # attribute
+    nameVis, valVis: bool
     text: string
     parent: Element # new, for easy reattaching, and maybe a graphical parent indication (arrow)
     detached: bool # maybe with new parent field this boolean is redundant. 
@@ -391,6 +478,9 @@ type
   Trace = ref object of PathLike # Element
 
 type
+  Net = ref object of PathLike # Element
+
+type
   Rect = ref object of Element
 
 type
@@ -399,6 +489,17 @@ type
 type
   Pad = ref object of Element
     cornerRadius: float
+
+type
+  GerberPad = ref object of Element
+    width: float
+    cap: LineCap
+    # cornerRadius: float
+
+type
+  GerberSilk = ref object of Element
+    width: float
+    cap: LineCap
 
 type
   Path = ref object of PathLike # Element
@@ -415,15 +516,8 @@ type
 
 type
   Group = ref object of Element
-    lines: seq[Line]
-    circs: seq[Circ]
-    texts: seq[Text]
-    rects: seq[Rect]
-    pads: seq[Pad]
-    holes: seq[Hole]
-    paths: seq[Path]
-    pins: seq[Pin]
-    traces: seq[Trace]
+    els: seq[Element]
+    origin: V2 # for inserting, origin is aligned with grid
 
 type
   UserAction {.pure.} = enum
@@ -447,13 +541,21 @@ iterator filter(t: Tree; pred: proc(x: Element): bool {.closure.}): Element =
 
 type
   PDA = ref object of gtk4.Grid
+    attrGrid: gtk4.Grid
+    cm: ConMark# = initCountTable[V2]()
+    attrRef: Element
+    attributes: array[MaxNumAttributes, AttrTuple]
     applicationWindow: ApplicationWindow
     textDataBuffer: TextBuffer
+    gfile: GFile # save actual path
+    str: string # for saving to file
     textData: string
     entry: Entry
     commandEntry: Entry
     world: Entry
     gridw: Entry
+    minorGridLabel: Label
+    majorGridLabel: Label
     cbtStyle: ComboBoxText
     activeShape: Shapes
     activeStyle: Styles
@@ -505,7 +607,9 @@ type
     legEvXY: V2
     showPadNumbers: bool
     showPadNames: bool
+    popoverMenu: PopoverMenu
 
+#[
 macro addItFields(fields: openArray[string]; o: untyped): untyped =
   expectKind(o, nnkIteratorDef)
   let objName = o.params[1][0]
@@ -519,6 +623,7 @@ macro addItFields(fields: openArray[string]; o: untyped): untyped =
 
 iterator items(g: Group): Element {.addItFields(["lines", "rects", "circs"]).} =
   discard
+]#
 
 proc move(el: Element; v: V2) 
 
@@ -533,13 +638,16 @@ proc move(el: Element; v: V2) =
 
 # constructors
 proc newLine(p1, p2: V2): Line =
-  Line(p: @[p1, p2])
+  Line(layer: findLayer(""), p: @[p1, p2])
 
 proc newPath(p1, p2: V2): Path =
   Path(p: @[p1, p2])
 
 proc newTrace(p1, p2: V2): Trace =
   Trace(p: @[p1, p2])
+
+proc newNet(p1, p2: V2): Net =
+  Net(layer: findLayer("Net"), p: @[p1, p2])
 
 proc sortedPair(p1, p2: V2): tuple[a, b: V2] =
   (result[0][0], result[1][0]) = sortedTuple(p1[0], p2[0])
@@ -549,18 +657,39 @@ proc newRect(p1, p2: V2): Rect =
   let h = sortedPair(p1, p2)
   Rect(p: @[h[0], h[1]])
 
-proc newText(p1, p2: V2; text: string): Text =
-  result = Text(text: text)
+proc newText(p1, p2: V2; text: string; name = ""; val = text): Text =
+  result = Text(text: text, name: name, val: val, valVis: val.len > 0, nameVis: name.len > 0)
+  #result.val = "huch"
   result.p = newSeq[V2](2 + 9)
   #result.style = Styles.hole # ?????????????????????
   result.p[0] = p1
   result.p[1] = p2
 
-proc newPad(p1, p2: V2): Pad =
+proc xnewPad(p1, p2: V2): Pad =
   let h = sortedPair(p1, p2)
   result = Pad(p: @[h[0], h[1]])
   result.style = Styles.pad
   result.at = @[Text(nil), Text(nil)] # number and name
+
+proc newPad(p1, p2: V2): Pad =
+  let h = sortedPair(p1, p2)
+  result = Pad(layer: findLayer("Pin"), p: @[h[0], h[1]], style: Styles.pad)
+  #result = Pad(p: @[h[0], h[1]])
+  #result.style = Styles.pad
+  #result.at = @[Text(nil), Text(nil)] # number and name
+  #result.at.add(newText(p1, p2, "7?", "num", "7?"))
+  #result.at.add(newText(p1, p2, "Name", "name", "Name"))
+  result.at = @[Text(nil), Text(nil)] # number and name
+
+
+proc newGerberPad(p1, p2: V2): GerberPad =
+  result = GerberPad(layer: findLayer("Pin"), p: @[p1, p2], style: Styles.pad)
+  result.at = @[Text(nil), Text(nil)] # number and name
+
+proc newGerberSilk(p1, p2: V2): GerberSilk =
+  result = GerberSilk(layer: findLayer("Pin"), p: @[p1, p2], style: Styles.silk)
+  #result.at = @[Text(nil), Text(nil)] # number and name
+
 
 proc newHole(p1, p2: V2): Hole =
   result = Hole(p: @[p1, p2])
@@ -612,14 +741,16 @@ proc putPinText(pin: Pin) =
       pin.at[PinNumberPos].gy = (gy + 2) and 2
 
 proc newPin(p1, p2: V2): Pin =
-  result = Pin(p: @[p1, p2], style: Styles.pin)
+  result = Pin(layer: findLayer("Pin"), p: @[p1, p2], style: Styles.pin)
   assert PinNamePos == 1
-  result.at.add(newText(p1, p2, "7?"))
-  result.at.add(newText(p1, p2, "Name"))
+  result.at.add(newText(p1, p2, "7?", "num", "7?"))
+  result.at.add(newText(p1, p2, "Name", "name", "Name"))
   result.at[PinNamePos].sizeInPixel = true
   result.at[PinNumberPos].sizeInPixel = true
   result.at[PinNamePos].style = Styles.pin
   result.at[PinNumberPos].style = Styles.pin
+  result.at[PinNumberPos].nameVis = false
+  result.at[PinNamePos].nameVis = false
   result.putPinText
 
 # distances
@@ -640,7 +771,8 @@ proc sqrDistanceRectLike(r: Element; xy: V2): float =
 
 proc sqrDistancePath(l: Path; xy: V2): float =
   result = float.high
-  for l in l.p.xpairs:
+  #for l in l.p.xpairs:
+  for l in l.p.pairwise:
     result = min(result, distanceLinePointSqr(l[0], l[1], xy)[1])
 
 proc sqrDistanceCirc(c: Circ; xy: V2): float =
@@ -655,11 +787,32 @@ proc sqrDistanceText(t: Text; xy: V2): float =
   y += (t.p[1][1] - t.p[0][1]) * (t.gy mod 3).float * 0.5
   sqrDistanceR(t.x1, t.y1, t.x2, t.y2, [x, y]) # caution, this is not xy!
 
+
+iterator allRec(tree: Tree): Element =
+  for el in tree.elements:
+    if el of Group:
+      for i in Group(el).els:
+        yield i
+    else:
+      yield el
+
+
 iterator allElements(tree: Tree; x: Element): Element =
   for el in tree.elements:
     yield el
   if x != nil:
     yield x
+
+
+iterator allNetEnds(tree: Tree): V2 =
+  #for el in tree.elements:
+  for el in tree.allRec:
+    if el of Net or el of Pin:
+      yield el.p[0]
+      if el of Net:
+        yield el.p[1]
+
+
 
 proc elAndText(tree: Tree): (Element, Text) =
   for el in tree.filter(el => el.selected):
@@ -720,7 +873,7 @@ proc absToScr(pda: PDA; x: float; smartScale: bool = false): float =
     let monitor: gdk4.Monitor = display.getMonitorAtSurface(surface)
     let geometry: gdk4.Rectangle = monitor.getGeometry
     scale = geometry.width.float / monitor.getWidthmm.float # inv. pixel size
-  result = x * scale / pda.fullscale # * customDetailScale # compensate monitor distance, viewing angle
+  result = x * scale / pda.fullScale # * customDetailScale # compensate monitor distance, viewing angle
   if smartScale:
     result /= smartScale(pda.userZoom)
 
@@ -764,17 +917,24 @@ proc cairoDevRound(w: float): float =
   else:
     floor((w + 0.5) mod 2) / 2 # if odd(round(w)): 0.5 else: 0
 
+#[
 macro genGroupMove(g: static[string]; fields: varargs[untyped]): untyped =
   var s: string
   for f in fields:
     s.add("for el in " & g & "." & f.repr & ":\n")
     s.add("  move(el, dxdy)\n")
   result = parseStmt(s)
+]#
 
 # we may use the items() iterator instead
 proc move(g: Group; dxdy: V2) =
   move(Element(g), dxdy)
-  genGroupMove("g", lines, rects, circs, pads, holes, pins, texts, traces, paths)
+  #genGroupMove("g", lines, rects, circs, pads, holes, pins, texts, traces, paths, groups)
+  for el in g.els:
+    if el of Group:
+      move(Group(el), dxdy)
+    else:
+      move(el, dxdy)
 
 proc move(pda: PDA) =
   let (a, b) = (pda.lastButtonDownPosUser[0], pda.lastButtonDownPosUser[1])
@@ -800,6 +960,7 @@ proc move(pda: PDA) =
   elif pda.movingObj of Pad or pda.movingObj of Hole:
     move(pda.movingObj, dxdy)
   else: # Path, Line, Pin...
+    echo pda.uact
     let l = pda.movingObj
     let i = minIndexByIt(l.p, math.hypot(a - it[0], b - it[1]))
     let p = l.p[i]
@@ -917,7 +1078,7 @@ proc boxEl(el: Element; pda: PDA): TreeBox =
     result = boxText(Text(el), pda)
   elif el of Path:
     result = boxPath(Path(el), pda)
-  else: #if el of Line or el of Pin or el of Trace or el of Rect or el of Group or el of Pad:
+  else: #if el of Line or el of Pin or el of Trace or el of Net or el of Rect or el of Group or el of Pad:
     result = box(el, pda)
 
 proc editText(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
@@ -928,6 +1089,30 @@ proc editText(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
     pda.entry.setText(t.text)
     pda.movingObj = t
   discard pda.entry.grabFocus
+
+
+proc escape(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
+  echo "escape"
+
+
+proc delete(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
+  echo "delete"
+  #pda.movingObj = pda.hover
+  #assert pda.movingObj != nil ################################## bug puh
+  # caution: tiny mouse jitter can set pda.hover to nil! From code a few lines above.
+  if pda.hover != nil:
+    var l = pda.hover
+    var el: TreeEl = (boxEl(l, pda), l)
+    pda.tree.delete(el)
+    pda.hover = nil
+    pda.movingObj = nil
+    pda.uact = none
+    pda.paint
+
+
+
+
+
 
 # attach "free" text, or attach detached text again
 proc attachText(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
@@ -974,23 +1159,89 @@ proc detachText(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
       text.detached = true
       pda.tree.insert(t)
 
-proc fileChooserSaveResponseCb(d: FileChooserDialog; id: int; str: string) =
+proc fileChooserSaveResponseCb(d: FileChooserDialog; id: int; pda: PDA) =
   if ResponseType(id) == ResponseType.accept:
     var f: File = open(d.file.getPath, fmWrite)
-    f.writeLine(str)
+    f.writeLine(pda.str)
+    pda.gFile = d.file # remember path
     f.close
   d.destroy
 
 proc saveGroup(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
   let g = pda.tree.selectedGroup()
   if g != nil:
-    let str = pretty(%* g)
+    pda.str = pretty(%* g)
     let dialog = newFileChooserDialog("Open File", pda.applicationWindow, FileChooserAction.save)
     discard dialog.addButton("Save", ResponseType.accept.ord)
     discard dialog.addButton("Cancel", ResponseType.cancel.ord)
-    dialog.connect("response", fileChooserSaveResponseCb, str)
+    dialog.connect("response", fileChooserSaveResponseCb, pda)
     dialog.show
  
+# https://developer.gnome.org/gtk4/unstable/GtkFileChooser.html#gtk-file-chooser-set-file
+proc prepareFileChooser(chooser: FileChooserDialog; pda: PDA) =
+  let documentIsNew = (pda.gFile == nil)
+  if documentIsNew:
+      let defaultFileForSaving = newGFileForPath ("./out.txt")
+      # the user just created a new document
+      discard chooser.setCurrentFolder(defaultFileForSaving)
+      chooser.setCurrentName("Untitled document")
+  else:
+      # the user edited an existing document
+      discard chooser.setFile(pda.gfile)
+
+proc groupAll(pda: PDA): Group =
+  var box: TreeBox
+  for el in pda.tree.elements:
+    box = boxEl(el, pda)
+    break
+  for el in pda.tree.elements:
+    box.boxGrow(boxEl(el, pda))
+  var g = Group(p: @[[box[0].a, box[1].a], [box[0].b, box[1].b]])
+
+  for el in pda.tree.elements:
+    g.els.add(el)
+#[
+  for el in pda.tree.elements:
+    if el of Line:
+      g.lines.add(Line(el))
+    elif el of Circ:
+      g.circs.add(Circ(el))
+    elif el of Hole:
+      g.holes.add(Hole(el))
+    elif el of Pad:
+      g.pads.add(Pad(el))
+    elif el of Pin:
+      g.pins.add(Pin(el))
+    elif el of Rect:
+      g.rects.add(Rect(el))
+    elif el of Text:
+      g.texts.add(Text(el))
+    elif el of Path:
+      g.paths.add(Path(el))
+    elif el of Trace:
+      g.traces.add(Trace(el))
+    elif el of Net:
+      g.nets.add(Net(el))
+    elif el of Group:
+      echo "g.groups.add(Group(el))"
+      g.groups.add(Group(el))
+    else:
+      assert(false)
+]#
+  return g
+
+proc saveAll(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
+  echo "save all"
+  let g = pda.groupAll
+  if g != nil:
+    pda.str = pretty(%* g)
+    let dialog = newFileChooserDialog("Save all", pda.applicationWindow, FileChooserAction.save)
+    prepareFileChooser(FileChooserDialog(dialog), pda)
+    discard dialog.addButton("Save", ResponseType.accept.ord)
+    discard dialog.addButton("Cancel", ResponseType.cancel.ord)
+    dialog.connect("response", fileChooserSaveResponseCb, pda)
+    dialog.show
+
 proc draw(pda: PDA)
 
 proc paint(pda: PDA; queueDraw = true) =
@@ -1003,6 +1254,34 @@ proc paint(pda: PDA; queueDraw = true) =
   pda.cr.restore
   if queueDraw:
     pda.darea.queueDraw
+
+
+
+proc fileChooserOpenResponseCb(d: FileChooserDialog; id: int; pda: PDA) =
+  if ResponseType(id) == ResponseType.accept:
+    let str = readFile(d.file.getPath)
+    let g = to(parseJson(str), Group)
+    let cx = pda.dataX + pda.dataWidth * 0.5
+    let cy = pda.dataY + pda.dataHeight * 0.5
+    var n = (cx - g.p[0][0]) / pda.grid[0]
+    let dx = roundToMultiple(n.int.float * pda.grid[0], pda.grid[0])
+    n = (cy - g.p[0][1]) / pda.grid[2]
+    let dy = roundToMultiple(n.int.float * pda.grid[2], pda.grid[2])
+    g.move([dx, dy])
+    var  box: TreeBox = [(g.p[0][0], g.p[1][0]), (g.p[0][1], g.p[1][1])]
+    var gb: TreeEl = (box, g)
+    pda.tree.insert(gb)
+    pda.paint
+  d.destroy
+
+proc openAll(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
+  let dialog = newFileChooserDialog("Open", pda.applicationWindow, FileChooserAction.open)
+  discard dialog.addButton("Load", ResponseType.accept.ord)
+  discard dialog.addButton("Cancel", ResponseType.cancel.ord)
+  dialog.connect("response", fileChooserOpenResponseCb, pda)
+  dialog.show
+
+
 
 proc fileChooserLoadResponseCb(d: FileChooserDialog; id: int; pda: PDA) =
   if ResponseType(id) == ResponseType.accept:
@@ -1028,6 +1307,27 @@ proc loadGroup(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
   dialog.connect("response", fileChooserLoadResponseCb, pda)
   dialog.show
 
+proc genTQFP(pda: PDA)
+
+proc genCAPC(pda: PDA)
+
+proc createFootprint(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
+  echo "createFootprint"
+  genCAPC(pda)
+  genTQFP(pda)
+
+
+proc schToPCB(pda: PDA) =
+  discard
+  for el in pda.tree.elements:
+    if el of Group:
+      for t in el.at:
+        echo t.name
+
+
+
+
+
 proc breakUpGroup(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
   var g: Group
   for el in pda.tree.filter(el => el.selected and el of Group):
@@ -1035,7 +1335,8 @@ proc breakUpGroup(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
   if g == nil: return
   var box: TreeBox
   var gb: TreeEl
-  for el in items(g):
+  #for el in items(g):
+  for el in g.els:
     box = boxEl(el, pda)
     gb = (box, el)
     pda.tree.insert(gb)
@@ -1054,6 +1355,8 @@ proc groupSelection(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA)
     discard pda.tree.delete(eb)
   var g = Group(p: @[[box[0].a, box[1].a], [box[0].b, box[1].b]])
   for el in collector:
+    g.els.add(el)
+#[
     if el of Line:
       g.lines.add(Line(el))
     elif el of Circ:
@@ -1072,15 +1375,44 @@ proc groupSelection(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA)
       g.paths.add(Path(el))
     elif el of Trace:
       g.traces.add(Trace(el))
+    elif el of Net:
+      g.nets.add(Net(el))
+    elif el of Group:
+      g.groups.add(Group(el))
+    else:
+      assert(false)
+]#
+
   var gb: TreeEl = (box, g)
   pda.tree.insert(gb)
 
-proc drawPath(l: Path; pda: PDA) =
+
+
+proc olddrawPath(l: Path; pda: PDA) =
   pda.cr.newPath
   for p in l.p:
     pda.cr.lineTo(p[0], p[1])
 
+
+proc drawPath(l: Path; pda: PDA) =
+  pda.cr.newPath
+  var i = l.p.high
+  if l.p[i] == l.p[0]:
+    dec(i)
+  for j in 0 .. i:
+    pda.cr.lineTo(l.p[j][0], l.p[j][1])
+  if i != l.p.high:
+    pda.cr.closePath
+
+
+
+
+
 proc drawTrace(l: Trace; pda: PDA) =
+  pda.cr.moveTo(l.x1, l.y1)
+  pda.cr.lineTo(l.x2, l.y2)
+
+proc drawNet(l: Net; pda: PDA) =
   pda.cr.moveTo(l.x1, l.y1)
   pda.cr.lineTo(l.x2, l.y2)
 
@@ -1126,11 +1458,16 @@ proc drawText(t: Text; pda: PDA; size: float = 0) =
     let y = t.y1 + height * (i div 3).float * 0.5
     t.grabPos(i) = [x + dx, y + dy]
 
+proc drawAttachedText(el: Element; pda: PDA) =
+  for t in el.at:
+    t.drawText(pda)
+
 proc drawLine(l: Line; pda: PDA) =
   pda.cr.moveTo(l.x1, l.y1)
   pda.cr.lineTo(l.x2, l.y2)
-  for el in l.at:
-    el.drawText(pda)
+  drawAttachedText(l, pda)
+  #for el in l.at:
+  #  el.drawText(pda)
 
 proc drawPad(r: Pad; pda: PDA) =
   pda.cr.rectangle(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1)
@@ -1155,6 +1492,57 @@ proc drawPad(r: Pad; pda: PDA) =
       r.at[i].gy = 1
       drawText(r.at[i], pda, ts)
 
+
+
+
+
+proc drawGerberSilk(r: GerberSilk; pda: PDA) =
+  #echo "drawGerberPad"
+  pda.cr.setLineCap(r.cap)
+  pda.cr.setLineWidth(r.width)
+  pda.cr.moveTo(r.x1, r.y1)
+  pda.cr.lineTo(r.x2, r.y2)
+  pda.cr.stroke
+
+
+proc drawGerberPad(r: GerberPad; pda: PDA) =
+  #echo "drawGerberPad"
+  pda.cr.setLineCap(r.cap)
+  pda.cr.setLineWidth(r.width)
+  pda.cr.moveTo(r.x1, r.y1)
+  var x2 = r.x2
+  if r.x1 == r.x2 and r.y1 == r.y2:
+    x2 += 1e-1
+  pda.cr.lineTo(x2, r.y2)
+  pda.cr.stroke
+  pda.cr.setSource(styles[r.style.ord].xcolor)
+  # pda.cr.setSource(styles[Styles.pad.ord].xcolor) # maybe we should use a fixed style?
+  let ts = min(r.x2 - r.x1, r.y2 - r.y1)
+  if pda.showPadNumbers and pda.showPadNames:
+    if r.at[PadNumberPos] != nil and r.at[PadNamePos] != nil:
+      r.at[PadNumberPos].gx = 2
+      r.at[PadNumberPos].gy = 1
+      r.at[PadNamePos].gx = 0
+      r.at[PadNamePos].gy = 1
+      #let ts = min(r.x2 - r.x1, r.y2 - r.y1)
+      drawText(r.at[PadNumberPos], pda, ts)
+      drawText(r.at[PadNamePos], pda, ts)
+  elif pda.showPadNumbers or pda.showPadNames:
+    let i = pda.showPadNames.int
+    if r.at[i] != nil: 
+      r.at[i].gx = 1
+      r.at[i].gy = 1
+      drawText(r.at[i], pda, ts)
+
+
+
+
+proc drawJunction(pda: PDA; pos: V2) =
+  pda.cr.setLineWidth(0)
+  pda.cr.setSource(XColorValues[XColors.junction.ord])
+  pda.cr.arc(pos[0], pos[1], JunctionRadius, 0, math.Tau)
+  pda.cr.fill
+
 proc drawPin(l: Pin; pda: PDA) =
   var h = math.hypot(l.x2 - l.x1, l.y2 - l.y1)
   if h == 0: # to fix
@@ -1165,7 +1553,8 @@ proc drawPin(l: Pin; pda: PDA) =
   pda.cr.lineTo(x, y)
   pda.cr.stroke
   pda.cr.moveTo(x, y)
-  pda.cr.setSource(styles[l.style.ord].xcolor)
+  if pda.cm[l.p[0]] == 0:
+    pda.cr.setSource(styles[l.style.ord].xcolor)
   pda.cr.lineTo(l.x1, l.y1)
   pda.cr.stroke
   pda.cr.setSource(XColorValues[XColors.pinName.ord]) # use XColor, as style color is needed for pin itself
@@ -1177,6 +1566,7 @@ proc drawCirc(c: Circ; pda: PDA) =
   let r = math.hypot(c.x1 - c.x2, c.y1 - c.y2)
   pda.cr.newPath
   pda.cr.arc(c.x1, c.y1, r, 0, math.Tau)
+  drawAttachedText(c, pda)
 
 proc drawHole(r: Hole; pda: PDA) =
   if r.x1 == r.x2 and r.y1 == r.y2: # round holes
@@ -1209,46 +1599,66 @@ proc drawHole(r: Hole; pda: PDA) =
       r.at[i].gy = 1
       drawText(r.at[i], pda, r.dia)
 
-proc drawGroup(g: Group; pda: PDA) =
-  for l in g.lines:
+proc drawEl(el: Element; pda: PDA; scale: float = 1.0; offset: float = 0.0)
+
+proc drawGroup(g: Group; pda: PDA; scale: float = 1.0; offset: float = 0.0) =
+
+  proc setW(l: Element) =
     pda.cr.setSource(styles[l.style.ord].color)
-    pda.setLineWidthAbs(styles[l.style.ord].lineWidth) # extend is still missing
+    if styles[l.style.ord].relSize:
+      pda.cr.setLineWidth(styles[l.style.ord].lineWidth * scale + offset)
+    else:
+      pda.setLineWidthAbs(styles[l.style.ord].lineWidth * scale + offset)
+
+
+
+
+  for layer in 0 .. layers.layers.high:
+    for el in g.els:
+      if el.layer == layer:
+        el.drawEl(pda, scale, offset)
+
+#[
+  for l in g.lines:
+    setW(l)
     drawLine(l, pda)
     pda.cr.stroke
   for l in g.circs:
-    pda.setLineWidthAbs(styles[l.style.ord].lineWidth)
-    pda.cr.setSource(styles[l.style.ord].color)
+    setW(l)
     drawCirc(l, pda)
     pda.cr.stroke
   for l in g.texts:
-    pda.cr.setSource(styles[l.style.ord].color)
+    setW(l)
     drawText(l, pda)
     #pda.cr.stroke
   for l in g.rects:
-    pda.setLineWidthAbs(styles[l.style.ord].lineWidth)
-    pda.cr.setSource(styles[l.style.ord].color)
+    setW(l)
     drawRect(l, pda)
     pda.cr.stroke
   for l in g.paths:
-    pda.setLineWidthAbs(styles[l.style.ord].lineWidth)
-    pda.cr.setSource(styles[l.style.ord].color)
+    setW(l)
     drawPath(l, pda)
     pda.cr.stroke
   for l in g.pins: # note: all pins should have the same style?
-    pda.setLineWidthAbs(styles[l.style.ord].lineWidth)
-    pda.cr.setSource(styles[l.style.ord].color)
+    setW(l)
     drawPin(l, pda)
     pda.cr.stroke
   for l in g.pads: # all same style?
-    pda.setLineWidthAbs(styles[l.style.ord].lineWidth)
-    pda.cr.setSource(styles[l.style.ord].color)
+    setW(l)
     drawPad(l, pda)
     pda.cr.stroke
   for l in g.traces:
-    pda.setLineWidthAbs(styles[l.style.ord].lineWidth)
-    pda.cr.setSource(styles[l.style.ord].color)
+    setW(l)
     drawTrace(l, pda)
     pda.cr.stroke
+  for l in g.groups:
+    echo "drawGroup(l, pda, scale, offset)"
+    drawGroup(l, pda, scale, offset)
+    pda.cr.stroke
+]#
+
+
+  drawAttachedText(g, pda)
 
 proc initDrawGrab(pda: PDA) =
   pda.cr.setSource(XColorValues[XColors.grab.ord])
@@ -1338,7 +1748,7 @@ proc drawGroupGrab(r: Group; pda: PDA) =
   pda.cr.fill
 
 proc sqrDistance(el: Element; xy: V2): float =
-  if el of Line or el of Pin or el of Trace:
+  if el of Line or el of Pin or el of Trace or el of Net:
     sqrDistanceLineLike(el, xy)
   elif el of Path:
     sqrDistancePath(Path(el), xy)
@@ -1358,7 +1768,26 @@ proc sqrDistance(el: Element; xy: V2): float =
 proc dist(qo: BoxCenter[2, float]; el: TreeEl): float =
   sqrDistance(el.l, [qo[0], qo[1]])
 
-proc drawEl(el: RootRef; pda: PDA) =
+
+proc findNearestElement(tree: Tree; a, b: float): Element =
+  for el in tree.findNearest(BoxCenter[2, float]([a, b]), dist):
+    if layers[el[1].layer].visible and not layers[el[1].layer].locked:
+    #if el[1] != nil:
+      return el[1]
+
+
+
+proc searchObj(tree: Tree; a, b: V2): seq[Element] =
+  for el in tree.searchObj([sortedTuple(a[0], b[0]), sortedTuple(a[1], b[1])]):
+    if layers[el.layer].visible and not layers[el.layer].locked:
+      result.add(el)
+
+proc drawEl(el: Element; pda: PDA; scale: float = 1.0; offset: float = 0.0) =
+  pda.cr.setSource(styles[el.style.ord].color) 
+  if styles[el.style.ord].relSize:
+    pda.cr.setLineWidth(styles[el.style.ord].lineWidth * scale + offset)
+  else:
+    pda.setLineWidthAbs(styles[el.style.ord].lineWidth * scale + offset)
   if el of Line:
     drawLine(Line(el), pda)
   elif el of Pin:
@@ -1368,10 +1797,17 @@ proc drawEl(el: RootRef; pda: PDA) =
   elif el of Trace:
     pda.cr.setLineCap(LineCap.round)
     drawTrace(Trace(el), pda)
+  elif el of Net:
+    pda.cr.setLineCap(LineCap.round)
+    drawNet(Net(el), pda)
   elif el of Rect:
     drawRect(Rect(el), pda)
   elif el of Pad:
     drawPad(Pad(el), pda)
+  elif el of GerberPad:
+    drawGerberPad(GerberPad(el), pda)
+  elif el of GerberSilk:
+    drawGerberSilk(GerberSilk(el), pda)
   elif el of Hole:
     pda.cr.setLineCap(LineCap.round)
     drawHole(Hole(el), pda)
@@ -1380,11 +1816,12 @@ proc drawEl(el: RootRef; pda: PDA) =
   elif el of Text:
     drawText(Text(el), pda)
   elif el of Group:
-    drawGroup(Group(el), pda)
+    drawGroup(Group(el), pda, scale, offset)
+  pda.cr.stroke
 
 proc drawElGrab(el: Element; pda: PDA) =
   #if true: return
-  if el of Line or el of Pin or el of Path or el of Trace:
+  if el of Line or el of Pin or el of Path or el of Trace or el of Net:
     if not (el of Trace and styles[el.style.ord].lineWidth < 0.8 * GrabDist):
       drawPathGrab(PathLike(el), pda)
   elif el of Hole:
@@ -1404,23 +1841,88 @@ proc drawElGrab(el: Element; pda: PDA) =
 # 1. Draw plain elements, blit its shadow and blit the drawing
 # 2. Draw all remaining elements with shadow extend and blit the shadow
 # 3. Draw all the non plain elements and blit the drawing with brighter color
-proc draw(pda: PDA) =
+proc draw(pda: PDA) = # puh
+  pda.cm = initCountTable[V2]()
+
   pda.cr.setSource(XColorValues[XColors.background.ord])
   pda.cr.paint
   pda.drawGrid
   pda.cr.setOperator(Operator.over)
+
+
+  for p in pda.tree.allNetEnds:
+      inc(pda.cm, p)
+
+  
+  for p in pda.tree.allNetEnds:
+    if pda.cm[p] == 1:
+      let h = pda.tree.searchObj(p, p)
+      if h.len > 1:
+        for el  in h:
+          if el of Net and el.p[0] != p and el.p[1] != p:
+            pda.cm[p] = 3
+
+
+  for el in pda.tree.allRec:
+    if el of Pin and pda.cm[el.p[0]] == 1:
+      pda.cm[el.p[0]] = 0
+
+
+
+  let r = styles[Styles.net.ord].lineWidth
+  pda.cr.setLineWidth(0)
+  pda.cr.setSource(0, 0, 0)
+  for c, i in pda.cm.pairs:
+    pda.cr.newPath
+    if i == 1:
+      pda.initDrawGrab()
+      #pda.cr.arc(xy[0], xy[1], pda.absToScr(GrabDist, true), 0, math.Tau)
+      pda.cr.arc(c[0], c[1], pda.absToScr(GrabDist), 0, math.Tau)
+      pda.cr.stroke
+
+    if i > 2:
+      #pda.initDrawGrab()
+      #pda.cr.arc(xy[0], xy[1], pda.absToScr(GrabDist, true), 0, math.Tau)
+      #pda.cr.arc(c[0], c[1], pda.absToScr(GrabDist / 2), 0, math.Tau)
+      #pda.cr.stroke
+      pda.drawJunction(c)
+
+
+  #pda.cr.fill
+  
+
+
+  # draw the locked elements
+  pda.cr.pushGroup
+  #let tmp00 = pda.cr.popGroup
+  for layer in 0 .. layers.layers.high:
+    for l in pda.tree.allElements(pda.movingObj):
+      if layers[l.layer].locked:
+        drawEl(l, pda) # draw with lineWidth matching state
+  let tmp00 = pda.cr.popGroup
+  pda.cr.setSource(0.5, 0.5, 0.5, 1)
+  pda.cr.mask(tmp00) # grey bottom shadow
+
+
+  pda.cr.setSource(tmp00)
+  pda.cr.paintWithAlpha(0.5)
+  patternDestroy(tmp00)
+
+
   for selected in [false, true]: # try all
     for hov in [false, true]: # four different states
       pda.cr.pushGroup
-      for l in pda.tree.allElements(pda.movingObj):
-        if l.selected == selected and hov == (l == pda.hover): # if loop state is state of el
-          pda.cr.setSource(styles[l.style.ord].color) # for text, set color before calling the draw procs
-          if styles[l.style.ord].relSize:
-            pda.cr.setLineWidth(styles[l.style.ord].lineWidth * (1.0 + 0.3 * (selected.int + (l == pda.hover).int).float) + (1.0 * (selected.int + (l == pda.hover).int).float))
-          else:
-            pda.setLineWidthAbs(styles[l.style.ord].lineWidth * (1.0 + 0.3 * (selected.int + (l == pda.hover).int).float) +  (1.0 * (selected.int + (l == pda.hover).int).float))
-          drawEl(l, pda) # draw with lineWidth matching state
-          pda.cr.stroke
+      for layer in 0 .. layers.layers.high:
+        #var layers: set[0 .. 63]# = {layer.int8}
+        #layers.incl(layer)
+        for l in pda.tree.allElements(pda.movingObj):
+          #if l.layer == layer and layers[layer].visible:
+          if l.layer == layer and layers[layer].visible and not layers[layer].locked:
+            if l.selected == selected and hov == (l == pda.hover): # if loop state is state of el
+              let scale = 1.0 + 0.3 * (selected.int + (l == pda.hover).int).float
+              let offset = 1.0 * (selected.int + (l == pda.hover).int).float
+              drawEl(l, pda, scale, offset) # draw with lineWidth matching state
+
       let tmp0 = pda.cr.popGroup
       let dd = pda.absToScr(0.2) # tiny offset
       pda.cr.translate(dd, dd)
@@ -1436,13 +1938,9 @@ proc draw(pda: PDA) =
         pda.cr.pushGroup
         for l in pda.tree.allElements(pda.movingObj): # the "highlighted" ones, for which shadow is larger than line width -- we have to draw them again
           if l.selected == selected and hov == (l == pda.hover): # if loop state is state of el
-            pda.cr.setSource(styles[l.style.ord].color) # for text, set color before calling the draw procs
-            if styles[l.style.ord].relSize:
-              pda.cr.setLineWidth(styles[l.style.ord].lineWidth * (1.0 + 0.3 * (selected.int + (l == pda.hover).int).float))
-            else:
-              pda.setLineWidthAbs(styles[l.style.ord].lineWidth * (1.0 + 0.3 * (selected.int + (l == pda.hover).int).float))
-            drawEl(l, pda)
-            pda.cr.stroke
+            let scale = 1.0 + 0.3 * (selected.int + (l == pda.hover).int).float
+            let offset = 0.0
+            drawEl(l, pda, scale, offset)
             if l == pda.hover: # draw the hover grab markers
               drawElGrab(l, pda)
         let tmp1 = pda.cr.popGroup
@@ -1522,30 +2020,45 @@ proc onMotion(c: EventControllerLegacy; e: Event; pda: PDA): bool =
   let y = pda.legEvXY[1]
   let h = pda.getUserCoordinates(pda.legEvXY)
   let (a, b) = (h[0], h[1])
-  var el: Element = pda.tree.findNearest(BoxCenter[2, float]([a, b]), dist)[1]
-  if el != nil:
-    if sqrDistance(el, [a, b]) < (pda.absToScr(GrabDist)) ^ 2:
-      pda.hover = el
-      el.hover = true
-    else:
-      pda.hover = nil
+
+  if pda.uact != lmbdo:
+    #var el: Element = pda.tree.findNearest(BoxCenter[2, float]([a, b]), dist)[1]
+    var el: Element = pda.tree.findNearestElement(a, b)
+    if el != nil:
+      if sqrDistance(el, [a, b]) < (pda.absToScr(GrabDist)) ^ 2:
+        pda.hover = el
+        el.hover = true
+      else:
+        pda.hover = nil
   if pda.uact == dragging and pda.movingObj != nil:
     pda.move
     paint(pda)
-  elif math.hypot(x - pda.lastButtonDownPos[0], y - pda.lastButtonDownPos[1]) > 2:
-    if pda.uact == lmbdv:
-      pda.uact = zooming
-    elif pda.uact == lmbdo:
-      pda.uact = dragging #selecting
-      pda.movingObj = pda.hover
-      assert pda.movingObj != nil
-      var l = pda.movingObj
-      var el: TreeEl = (boxEl(l, pda), l)
-      pda.tree.delete(el)
+
   elif pda.uact == selecting: #state.contains(button1): # selecting
+    echo "Xselecting"
     pda.selecting = true
     pda.zoomRect = [x, y]
     pda.darea.queueDraw #Area(0, 0, pda.darea.allocatedWidth, pda.darea.allocatedHeight)
+
+
+  elif math.hypot(x - pda.lastButtonDownPos[0], y - pda.lastButtonDownPos[1]) > 2:
+    if pda.uact == lmbdv:
+      pda.uact = zooming
+      pda.uact = selecting
+      echo "selecting"
+    elif pda.uact == lmbdo:
+      pda.uact = dragging #selecting
+      pda.movingObj = pda.hover
+      assert pda.movingObj != nil ################################## bug puh
+      # caution: tiny mouse jitter can set pda.hover to nil! From code a few lines above.
+      var l = pda.movingObj
+      var el: TreeEl = (boxEl(l, pda), l)
+      pda.tree.delete(el)
+  #elif pda.uact == selecting: #state.contains(button1): # selecting
+  #  echo "Xselecting"
+  #  pda.selecting = true
+  #  pda.zoomRect = [x, y]
+  #  pda.darea.queueDraw #Area(0, 0, pda.darea.allocatedWidth, pda.darea.allocatedHeight)
   elif false: #button2 in state: # panning
     pda.updateAdjustmentsAndPaint(pda.lastMousePos[0] - x, pda.lastMousePos[1] - y)
   if pda.points.len > 0 or pda.hover != pda.lastHover:
@@ -1592,6 +2105,16 @@ proc scrollEvent(c: EventControllerLegacy; event: ScrollEvent; pda: PDA): bool =
         (pda.vadjustment.value + pda.darea.allocatedHeight.float * 0.5) * (pda.userZoom / z0 - 1))
   return gdk4.EVENT_STOP
 
+
+
+proc updateAttrWidgets(pda: PDA) =
+  echo "updateAttrWidgets"
+
+proc rmButtonPressEvent(c: EventControllerLegacy; e: Event; pda: PDA): bool =
+  
+  echo "rmButtonPressEvent"
+
+
 proc buttonPressEvent(c: EventControllerLegacy; e: Event; pda: PDA): bool =
   pda.lastMousePos = pda.legEvXY
   pda.lastButtonDownPos = pda.legEvXY
@@ -1601,15 +2124,117 @@ proc buttonPressEvent(c: EventControllerLegacy; e: Event; pda: PDA): bool =
   elif pda.hover.isNil:
     pda.uact = lmbdv
   else:
+    updateAttrWidgets(pda)
     pda.uact = lmbdo
   return gdk4.EVENT_STOP
 
 # zoom into selected rectangle and center it
 # math: we first center the selection rectangle, and then compensate for translation due to scale
 
+proc hideAttributes(el: Element; pda: PDA) =
+  for a in pda.attributes:
+    #echo a.text
+    #a.name.setActive(-1)
+    #a.name.hide
+    #a.text.hide
+    #a.nameVis.hide
+    #a.textVis.hide
+    a.name.setSensitive(false)
+    a.text.setSensitive(false)
+    a.nameVis.setSensitive(false)
+    a.textVis.setSensitive(false)
+
+
+    #let entry 
+    #let entry = cast[Entry](pda.attributes[i].name.getChild)
+    #entry.setText(a.text)
+
+# puh signalHandlerBlock
+proc clearAttributes(pda: PDA) =
+  for a in pda.attributes:
+    #echo "###", a.text == nil
+    #a.name.setText(nil)
+    a.text.setText("")
+    #setProperty(a.text, "text", toStrVal(""))
+    let entry = cast[Entry](a.name.getChild)
+    entry.setText("")
+    a.nameVis.setActive(false)
+    a.textVis.setActive(false)
+
+
+
+proc showAttributes(el: Element; pda: PDA) =
+
+
+  #echo 
+
+
+  pda.attrRef = nil
+  clearAttributes(pda)
+  pda.attrRef = el
+  for i, a in el.at:
+    echo a.valVis, a.nameVis, "XXX"
+
+
+
+
+
+    echo a.text
+    pda.attributes[i].text.setText(a.val)
+    pda.attributes[i].textVis.setActive(a.valVis)
+
+    #let entry 
+    let entry = cast[Entry](pda.attributes[i].name.getChild)
+    entry.setText(a.name)
+
+    pda.attributes[i].name.setActive(-1)
+
+
+    pda.attributes[i].nameVis.setActive(a.nameVis)
+    let a = pda.attributes[i]
+    a.name.show
+    a.text.show
+    a.nameVis.show
+    a.textVis.show
+    a.name.setSensitive
+    a.text.setSensitive
+    a.nameVis.setSensitive
+    a.textVis.setSensitive
+  
+
+
+  #pda.attrGrid.show
+  gtk4.show(pda.attrGrid)
+
+proc rmButtonEvent(c: EventControllerLegacy; event: ButtonEvent; pda: PDA): bool =
+  var x, y: float
+  echo "rmButtonEvent"
+  #discard event.getPosition(x, y)
+  (x, y) = pda.legEvXY
+  echo x, " ", y
+  let r = gdk4.Rectangle(x: x.int32, y: y.int32, width: 1, height: 1)
+  set_pointing_to(cast[Popover](pda.popoverMenu), r)
+  popup(cast[Popover](pda.popoverMenu))
+
+
+
+
 proc buttonReleaseEvent(c: EventControllerLegacy; event: ButtonEvent; pda: PDA): bool =
   let x = pda.legEvXY[0]
   let y = pda.legEvXY[1]
+
+  if pda.selecting:
+    pda.selecting = false
+    pda.uact = UserAction.none
+    echo "pda.selecting = false"
+    var hhh = pda.tree.searchObj(pda.lastButtonDownPosUser, pda.getUserCoordinates([x, y]))
+    for el in mitems(hhh):
+      el.selected = true
+
+    pda.paint
+    return gdk4.EVENT_STOP
+
+
   if pda.uact == UserAction.lmbdv and pda.hover == nil: # and pda.selected.lines.len > 0:
     var h = false
     for el in pda.tree.elements: #pda.movingObj):
@@ -1643,20 +2268,24 @@ proc buttonReleaseEvent(c: EventControllerLegacy; event: ButtonEvent; pda: PDA):
           pda.hover.isNew = true
           paint(pda)
           break
-    var ret = false
-    for l in pda.tree.elements:
-      if l == pda.hover:
-        if not l.selected: ret = true
-        l.selected = true
-    if ret:
+    if not pda.hover.selected: # select if unselected, else other action like starting a new line... 
+      #ret = true ups
+      pda.hover.selected = true
+      #if ret:
+      #echo "bbb"
       pda.uact = UserAction.none
+      showAttributes(pda.hover, pda)
       return
-  if pda.movingObj != nil and pda.uact == dragging:
+  else:
+      hideAttributes(pda.hover, pda)
+  if pda.movingObj != nil and pda.uact == dragging: # remove equal points p[i], p[i+1] and remove object like line when thre is only one point left
     var l = pda.movingObj
+    deTwin(l.p)
     pda.movingObj = nil
     pda.points.setLen(0)
-    var el: TreeEl = (boxEl(l, pda), l)
-    pda.tree.insert(el)
+    if l.p.len > 1 or l of Hole:
+      var el: TreeEl = (boxEl(l, pda), l)
+      pda.tree.insert(el)
     pda.uact = UserAction.none
   let uc = pda.getUserCoordinates(pda.legEvXY)
   let ucr = pda.roundToGrid(uc)
@@ -1675,6 +2304,8 @@ proc buttonReleaseEvent(c: EventControllerLegacy; event: ButtonEvent; pda: PDA):
       l = newPath(pda.points[0], pda.points[0])
     elif pda.activeShape == Shapes.trace:
       l = newTrace(pda.points[0], pda.points[0])
+    elif pda.activeShape == Shapes.net:
+      l = newNet(pda.points[0], pda.points[0])
     elif pda.activeShape == Shapes.rect:
       l = newRect(pda.points[0], pda.points[0])
     elif pda.activeShape == Shapes.pad:
@@ -1715,22 +2346,31 @@ proc buttonReleaseEvent(c: EventControllerLegacy; event: ButtonEvent; pda: PDA):
         pda.tree.insert(el)
         pda.points.setLen(0)
         pda.uact = UserAction.none
-      else:
+      else: # puh
+        
         l.p.add(pda.points[0])
         pda.points[0] = pda.points[1]
         pda.points.setLen(1)
         pda.uact = constructing
     else:
       pda.movingObj = nil
-      var el: TreeEl = (boxEl(l, pda), l)
-      pda.tree.insert(el)
+      if l.p[0] == l.p[1]:
+        echo "Discarded" # name
+        if l.at.len > 0:
+          needsRefresh = true
+        #needsRefresh or= l.at.len > 0
+      else:
+        var el: TreeEl = (boxEl(l, pda), l)
+        pda.tree.insert(el)
       pda.points.setLen(0)
       pda.uact = UserAction.none
     if l of Pad or l of Hole:
       let (x1, y1, x2, y2) = (l.p[0][0], l.p[0][1], l.p[1][0], l.p[1][1])
-      l.at[PadNamePos] = newText([(x1 + x2) * 0.5, (y1 + y2) * 0.5], [x2, y2], "Name")
+      l.at[PadNamePos] = newText([(x1 + x2) * 0.5, (y1 + y2) * 0.5], [x2, y2], "Name", "name", "Name")
       l.at[PadNamePos].sizeInPixel = true
-      l.at[PadNumberPos] = newText([(x1 + x2) * 0.5, (y1 + y2) * 0.5], [x2, y2], "Num")
+      l.at[PadNumberPos] = newText([(x1 + x2) * 0.5, (y1 + y2) * 0.5], [x2, y2], "7?", "num", "7?")
+      #result.at.add(newText(p1, p2, "7?", "num", "7?"))
+      #result.at.add(newText(p1, p2, "Name", "name", "Name"))
       l.at[PadNumberPos].sizeInPixel = true
   if needsRefresh:
     paint(pda)
@@ -1738,6 +2378,9 @@ proc buttonReleaseEvent(c: EventControllerLegacy; event: ButtonEvent; pda: PDA):
 
 proc distributeLegacyEvent(c: EventControllerLegacy; e: Event; pda: PDA): bool =
   let et = e.getEventType
+  #echo e of ButtonEvent
+  #echo et
+
   case et
   of EventType.buttonPress, buttonRelease, motionNotify:
     var nx, ny: float
@@ -1749,6 +2392,11 @@ proc distributeLegacyEvent(c: EventControllerLegacy; e: Event; pda: PDA): bool =
     discard translateCoordinates(toplevel, widget, x - nx, y - ny, x, y) # TODO add getRootWindow()
     pda.legEvXY = [x, y]
   else: discard
+
+  if et == EventType.buttonPress and cast[ButtonEvent](e).getButton == 3:
+    return rmButtonEvent(c, cast[ButtonEvent](e), pda)
+    #echo cast[ButtonEvent](e).getButton
+
   case et
   of EventType.buttonPress:
     return buttonPressEvent(c, e, pda)
@@ -1798,6 +2446,407 @@ proc padCommand(input: string; pda: PDA) =
     y1 += dy
     x2 += dx
     y2 += dy
+  pda.paint
+
+
+proc genPad(w, h: float; n: int): Pad =
+  #let x1 = -
+  #let y1 = y
+  let x2 = w / 2
+  let y2 = h / 2
+  let x1 = -x2
+  let y1 = -y2
+  let pad = newPad([x1, y1], [x2, y2])
+  pad.at = newSeq[Text](2)
+  pad.at[PadNamePos] = newText([0.0, 0.0], [x2, y2], "?")
+  pad.at[PadNumberPos] = newText([0.0, 0.0], [x2, y2], $n)
+  return pad
+
+proc movePad(pad: Pad; dx, dy: float) =
+  pad.p[0] += [dx, dy]
+  pad.p[1] += [dx, dy]
+  for t in pad.at:
+    t.p[0] += [dx, dy]
+    t.p[1] += [dx, dy]
+
+
+
+proc genPad(x1, y1, x2, y2: float; n: int): Pad =
+  #let x1 = x
+  #let y1 = y
+  #let x2 = x + w
+  #let y2 = y + h
+  let pad = newPad([x1, y1], [x2, y2])
+  pad.at = newSeq[Text](2)
+  pad.at[PadNamePos] = newText([(x1 + x2) * 0.5, (y1 + y2) * 0.5], [x2, y2], "?")
+  pad.at[PadNumberPos] = newText([(x1 + x2) * 0.5, (y1 + y2) * 0.5], [x2, y2], $n)
+  return pad
+
+
+
+
+
+proc genGerberPad(x1, y1, x2, y2, w: float; n: int; cap: LineCap): GerberPad =
+  let pad = newGerberPad([x1, y1], [x2, y2])
+  pad.width = w
+  pad.cap = cap
+  pad.at = newSeq[Text](2)
+  pad.at[PadNamePos] = newText([(x1 + x2) * 0.5, (y1 + y2) * 0.5], [x2, y2], "?")
+  pad.at[PadNumberPos] = newText([(x1 + x2) * 0.5, (y1 + y2) * 0.5], [x2, y2], $n)
+  return pad
+
+
+
+
+
+proc genGerberSilk(x1, y1, x2, y2, w: float; cap: LineCap): GerberSilk =
+  let s = newGerberSilk([x1, y1], [x2, y2])
+  s.width = w
+  s.cap = cap
+  #pad.at = newSeq[Text](2)
+  #pad.at[PadNamePos] = newText([(x1 + x2) * 0.5, (y1 + y2) * 0.5], [x2, y2], "?")
+  #pad.at[PadNumberPos] = newText([(x1 + x2) * 0.5, (y1 + y2) * 0.5], [x2, y2], $n)
+  return s
+
+
+proc moveGerberSilk(s: GerberSilk; dx, dy: float) =
+  s.p[0] += [dx, dy]
+  s.p[1] += [dx, dy]
+
+
+
+proc xgenTQFP(pda:PDA) =
+  # Name, Contact Pitch, Contact Pad Spacing, Contact Pad Spacing, Contact Pad Width, Contact Pad Length, Number of Leads
+  var input, name: string
+  var pitch, cps1, cps2, cpw, cpl: float
+  var n: int
+  var res: bool
+  let h = "TQFP80P1000X1000X100-44N 0.8 11.4 11.4 0.55 1.5 44"
+  var g = Group()
+  g.p.add([-2.0, -2])
+  g.p.add([2.0, 2])
+  g.els = newSeq[Element]()
+  input = h
+  res = scanf(input, "${parseToSep}$[sep]$f$[sep]$f$[sep]$f$[sep]$f$[sep]$f$[sep]$i", name, pitch, cps1, cps2, cpw, cpl, n)
+  echo res, name, pitch, cps1, cps2, cpw, cpl, n
+
+  assert(n mod 4 == 0)
+  n = n div 4
+  let s = pitch - cpw
+  var x, y: float
+  x = -cps1 / 2 - cpl / 2
+  y = -(pitch * n.float) / 2 + s / 2 
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, cpl, cpw, i))
+    y += pitch
+
+  y =  cps2 / 2 - cpl / 2
+  x = -(pitch * n.float) / 2 + s / 2 
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, cpw, cpl, i + n))
+    x += pitch
+
+  x =  cps1 / 2 - cpl / 2
+  y =  (pitch * n.float) / 2 - s / 2 - cpw
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, cpl, cpw, i + 2 * n))
+    y -= pitch
+
+  y =  -cps2 / 2 - cpl / 2
+  x =  (pitch * n.float) / 2 - s / 2 - cpw 
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, cpw, cpl, i + 3 * n))
+    x -= pitch
+
+  var el: TreeEl = (boxEl(g, pda), g)
+  pda.tree.insert(el)
+  pda.paint
+
+
+
+proc genTQFP(pda:PDA) =
+  # Name, Contact Pitch, Contact Pad Spacing, Contact Pad Spacing, Contact Pad Width, Contact Pad Length, Number of Leads
+  var input, name: string
+  var pitch, cps1, cps2, cpw, cpl: float
+  var n: int
+  var res: bool
+  let h = "TQFP80P1000X1000X100-44N 0.8 11.4 11.4 0.55 1.5 44"
+  var g = Group()
+
+  input = h
+  res = scanf(input, "${parseToSep}$[sep]$f$[sep]$f$[sep]$f$[sep]$f$[sep]$f$[sep]$i", name, pitch, cps1, cps2, cpw, cpl, n)
+  echo res, name, pitch, cps1, cps2, cpw, cpl, n
+
+  #g.p.add([-2.0, -2])
+  #g.p.add([2.0, 2])
+  g.p.add([-(cps1 + cpl) / 2, -(cps2 + cpl) / 2])
+  g.p.add([(cps1 + cpl) / 2, (cps2 + cpl) / 2])
+  g.origin = [0.0, 0]
+  g.els = newSeq[Element]()
+
+  assert(n mod 4 == 0)
+  n = n div 4
+
+  let s = pitch - cpw
+  var x, y: float
+  x = -cps1 / 2 - cpl / 2
+  y = -(pitch * n.float) / 2 + s / 2 
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, x + cpl, y + cpw, i))
+    y += pitch
+
+  y =  cps2 / 2 - cpl / 2
+  x = -(pitch * n.float) / 2 + s / 2 
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, x + cpw, y + cpl, i + n))
+    x += pitch
+
+  x =  cps1 / 2 - cpl / 2
+  y =  (pitch * n.float) / 2 - s / 2 - cpw
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, x + cpl, y + cpw, i + 2 * n))
+    y -= pitch
+
+  y =  -cps2 / 2 - cpl / 2
+  x =  (pitch * n.float) / 2 - s / 2 - cpw 
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, x + cpw, y + cpl, i + 3 * n))
+    x -= pitch
+
+  # ######################
+
+  var x1, y1: float
+  let w = 0.2 # 0.2 mm ink width
+  x1 = -cps1 / 2 - cpl / 2 + w / 2
+  y1 = -cps2 / 2 - cpl / 2 + w / 2
+  g.els.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.els.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+
+  g.els.add(genGerberSilk(x1 - cpw, y1 + cpl, x1 - cpw, y1 + cpl, pitch, LineCap.round))
+
+
+  #x1 = -cps1 / 2 - cpl / 2 + w / 2
+  y1 = -y1# -cps2 / 2 - cpl / 2 + w / 2
+  g.els.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.els.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+
+  x1 = -x1#-cps1 / 2 - cpl / 2 + w / 2
+  #y1 = -cps2 / 2 - cpl / 2 + w / 2
+  g.els.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.els.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+
+  #x1 = -cps1 / 2 - cpl / 2 + w / 2
+  y1 = -y1#-cps2 / 2 - cpl / 2 + w / 2
+  g.els.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.els.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+
+
+  g.move([50.0, 50])
+  var el: TreeEl = (boxEl(g, pda), g)
+
+  pda.tree.insert(el)
+  pda.paint
+
+
+
+proc newTQFP(pda:PDA): Group =
+  # Name, Contact Pitch, Contact Pad Spacing, Contact Pad Spacing, Contact Pad Width, Contact Pad Length, Number of Leads
+  var input, name: string
+  var pitch, cps1, cps2, cpw, cpl: float
+  var n: int
+  var res: bool
+  let h = "TQFP80P1000X1000X100-44N 0.8 11.4 11.4 0.55 1.5 44"
+  var g = Group()
+
+  input = h
+  res = scanf(input, "${parseToSep}$[sep]$f$[sep]$f$[sep]$f$[sep]$f$[sep]$f$[sep]$i", name, pitch, cps1, cps2, cpw, cpl, n)
+  echo res, name, pitch, cps1, cps2, cpw, cpl, n
+
+  #g.p.add([-2.0, -2])
+  #g.p.add([2.0, 2])
+  g.p.add([-(cps1 + cpl) / 2, -(cps2 + cpl) / 2])
+  g.p.add([(cps1 + cpl) / 2, (cps2 + cpl) / 2])
+  g.origin = [0.0, 0]
+  g.els = newSeq[Element]()
+
+  assert(n mod 4 == 0)
+  n = n div 4
+
+  let s = pitch - cpw
+  var x, y: float
+  x = -cps1 / 2 - cpl / 2
+  y = -(pitch * n.float) / 2 + s / 2 
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, x + cpl, y + cpw, i))
+    y += pitch
+
+  y =  cps2 / 2 - cpl / 2
+  x = -(pitch * n.float) / 2 + s / 2 
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, x + cpw, y + cpl, i + n))
+    x += pitch
+
+  x =  cps1 / 2 - cpl / 2
+  y =  (pitch * n.float) / 2 - s / 2 - cpw
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, x + cpl, y + cpw, i + 2 * n))
+    y -= pitch
+
+  y =  -cps2 / 2 - cpl / 2
+  x =  (pitch * n.float) / 2 - s / 2 - cpw 
+  for i in 0 ..< n:
+    g.els.add(genPad(x, y, x + cpw, y + cpl, i + 3 * n))
+    x -= pitch
+
+  # ######################
+
+  var x1, y1: float
+  let w = 0.2 # 0.2 mm ink width
+  x1 = -cps1 / 2 - cpl / 2 + w / 2
+  y1 = -cps2 / 2 - cpl / 2 + w / 2
+  g.els.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.els.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+
+  g.els.add(genGerberSilk(x1 - cpw, y1 + cpl, x1 - cpw, y1 + cpl, pitch, LineCap.round))
+
+
+  #x1 = -cps1 / 2 - cpl / 2 + w / 2
+  y1 = -y1# -cps2 / 2 - cpl / 2 + w / 2
+  g.els.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.els.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+
+  x1 = -x1#-cps1 / 2 - cpl / 2 + w / 2
+  #y1 = -cps2 / 2 - cpl / 2 + w / 2
+  g.els.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.els.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+
+  #x1 = -cps1 / 2 - cpl / 2 + w / 2
+  y1 = -y1#-cps2 / 2 - cpl / 2 + w / 2
+  g.els.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.els.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+
+
+  #g.move([50.0, 50])
+  return g
+  #var el: TreeEl = (boxEl(g, pda), g)
+
+  #pda.tree.insert(el)
+  #pda.paint
+
+
+proc findAttrIndex(el: Element; s: string): int =
+  result = -1
+  for i, t in el.at:
+    if t.name == s:
+      return i
+
+
+proc findPadWithNumber(g: Group; num: string): Pad =
+  echo "findPadWithNumber", num
+  result = nil
+  for el in g.els:
+    if el of Pad:
+      echo el.at[0].val, num
+      if el.at[0].val == num:
+        return Pad(el)
+
+
+iterator pins(g: Group): Pin =
+  for el in g.els:
+    if el of Pin:
+      yield Pin(el) 
+
+
+proc findSymbols(pda: PDA) =
+  var footprints: seq[Element]
+  for el in pda.tree.elements:
+    if el of Group:
+      for t in el.at:
+        if t.name == "footprint":
+          let h = newTQFP(pda)
+          for p in pins(Group(el)):
+            echo p.at[PinNamePos].name, " :: ", p.at[PinNamePos].val
+            if p.at[PinNamePos].val != "":
+              let pad = h.findPadWithNumber(p.at[PinNumberPos].val)
+              if pad != nil:
+                echo ">>>", pad.at[1].val, p.at[PinNamePos].val
+                pad.at[1].val = "xxx"#p.at[PinNamePos].val
+                pad.at[1].text = "xxx"
+              #let i = h.findAttrIndex(p.at[PinNamePos].val)
+              
+
+          #for p in Group(el):
+          #  if p.at[0].len > 0:
+          #    let n = p.at[0]
+
+          let pos = roundToGrid(pda, el.p[0])
+          h.move(pos)
+          footprints.add(h)
+  pda.tree = newRStarTree[8, 2, float, Element]()
+  for el in footprints:
+
+    var el: TreeEl = (boxEl(el, pda), el)
+    pda.tree.insert(el)
+  pda.paint
+
+
+
+proc createPCB(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
+  # PinNamePos
+  echo "createPCB"
+  findSymbols(pda)
+  #schToPCB(pda)
+  #genCAPC(pda)
+
+
+
+proc genCAPC(pda:PDA) =
+#[
+Footprint design for discrete MLCC (Multilayer Ceramic Chip Capacitor), Reflow Soldering
+https://www.ibselectronics.com/pdf/pa/walsin/smt_notes.pdf
+https://www.pcb-3d.com/electric_type/capacitors-chip-non-polarized-capc/
+
+ <----A---->
+    <-B->
+ <C>
+ | |     | | D 
+<-----F----->
+F and G denote occupied area
+###
+Name SIZE A B C D E F G Accuracy
+CAPC1005_EIA_0402_METRIC_1005_100x050 0402 1.50 0.50 0.50 0.50 0.10 1.75 0.95 ± 0.15
+# 0508 2.50 0.50 1.00 2.00 0.15 2.90 2.40 ± 0.20
+CAPC1608_EIA_0603_METRIC_1608_160x080 0603 2.30 0.70 0.80 0.80 0.20 2.55 1.40 ± 0.25
+# 0612 2.80 0.80 1.00 3.20 0.20 3.08 3.85 ± 0.25
+CAPC2012_EIA_0805_METRIC_2012_200x120 0805 2.80 1.00 0.90 1.30 0.40 3.08 1.85 ± 0.25
+CAPC3216_EIA_1206_METRIC_3216_320x160 1206 4.00 2.20 0.90 1.60 1.60 4.25 2.25 ± 0.25
+CAPC3225_EIA-1210_METRIC_3225_320x250 1210 4.00 2.20 0.90 2.50 1.60 4.25 3.15 ± 0.25
+# 1808 5.40 3.30 1.05 2.30 2.70 5.80 2.90 ± 0.25
+CAPC4532_EIA_1812_METRIC_4532_450x320 1812 5.30 3.50 0.90 3.80 3.00 5.55 4.05 ± 0.25
+# 2220 6.50 4.70 0.90 5.60 4.20 6.75 5.85 ± 0.25
+]#
+
+  var input, name: string
+  var size: int
+  var a, b, c, d, e, f, g: float
+  let h = "CAPC1608_EIA_0603_METRIC_1608_160x080 0603 2.30 0.70 0.80 0.80 0.20 2.55 1.40  "
+  let gr = Group()
+  input = h
+  let res = scanf(input, "${parseToSep}$[sep]$i$[sep]$f$[sep]$f$[sep]$f$[sep]$f$[sep]$f$[sep]$f$[sep]$f", name, size, a, b, c, d, e, f, g)
+  #echo name, size, a, b, c, d, e, f, g
+  let w = 0.1
+  gr.els.add(genPad(-a / 2, -d / 2, -a / 2 + c, d / 2, n = 0))
+  gr.els.add(genPad( a / 2 - c, -d / 2, a / 2, d / 2, n = 1))
+  gr.p.add([-f / 2, -g / 2]) # box
+  gr.p.add([f / 2, g / 2])
+  f -= w
+  g -= w
+  gr.els.add(genGerberSilk(-f / 2, -g / 2, f / 2, -g / 2, 2 * w, LineCap.round)) # top
+  gr.els.add(genGerberSilk(-f / 2,  g / 2, f / 2,  g / 2, 2 * w, LineCap.round)) # bottom
+  gr.els.add(genGerberSilk(-f / 2, -g / 2, -f / 2, g / 2, 2 * w, LineCap.round)) # left
+  gr.els.add(genGerberSilk( f / 2,  g / 2, f / 2,  -g / 2, 2 * w, LineCap.round)) # right
+  var el: TreeEl = (boxEl(gr, pda), gr)
+  pda.tree.insert(el)
   pda.paint
 
 proc holeCommand(input: string; pda: PDA) =
@@ -1878,10 +2927,26 @@ proc commandEntryActivate(entry: Entry; pda: PDA) =
   of "hole":  holeCommand(com, pda)
   else: discard
 
+#    name, val: string # attribute
 proc entryActivate(entry: Entry; pda: PDA) =
   if pda.movingObj != nil:
+    let text = Text(pda.movingObj)
     Text(pda.movingObj).text = entry.text
+    text.valVis = true
     Text(pda.movingObj).isNew = entry.text.len > 0
+    let t = entry.text
+    if t.find(':') > 0:
+      (text.name, text.val) = t.split(':', 1)
+      text.valVis = true
+      text.nameVis = true
+    else:
+      text.name = "none"
+      text.val = t
+      text.valVis = true
+      text.nameVis = false
+      #Text(pda.movingObj).text = "none:" & t
+      #text.nameVis = text.name[0] != '.'
+      #text.valVis = text.val[0] != '.'
     #pda.movingObj = nil
     pda.paint
 
@@ -1895,7 +2960,13 @@ proc fontEntryActivate(entry: Entry) =
   echo "lineWidthEntryActivate"
 
 proc gridToggled(b: ToggleButton; pda: PDA) =
-  let i = b.getActive.int
+  var i: int
+  if b.getActive:
+    b.setChild(pda.minorGridLabel)
+    i = 1
+  else:
+    b.setChild(pda.majorGridLabel)
+  #let i = b.getActive.int
   pda.activeG = i
   pda.activeGrid = [pda.grid[i], pda.grid[i + 2]]
 
@@ -2049,6 +3120,85 @@ proc sizeSpinButtonValueChanged(s: SpinButton) =
 proc xcolorSet(b: ColorButton) =
   echo "xcolorSet"
 
+
+proc updateAttr(pda: PDA; row: int) =
+  let nameVis = pda.attributes[row][1].getActive
+  let valVis = pda.attributes[row][3].getActive
+
+  let name = pda.attributes[row][0].getActiveText
+  let val = pda.attributes[row][2].text
+
+  #pda.attrRef.at[row].name = name
+  #pda.attrRef.at[row].val = val
+
+  if false:#pda.attrRef.at[row].name.len == 0: # plain text, not an attribute
+    discard
+  else:
+    if nameVis and valVis:
+      pda.attrRef.at[row].text = name & ':' & val
+    elif nameVis:
+      pda.attrRef.at[row].text = name
+    elif valVis:
+      pda.attrRef.at[row].text = val
+    else:
+      pda.attrRef.at[row].text.setLen(0)
+
+
+
+proc cbCb(w: ComboboxText; par: tuple[row: int; pda: PDA]) =
+  echo "cbCb"
+
+  if par.pda.attrRef != nil:
+    par.pda.attrRef.at[par.row].name = par.pda.attributes[par.row][0].getActiveText
+    updateAttr(par.pda, par.row)
+    par.pda.paint
+
+
+proc attrCb(w: Entry; par: tuple[row: int; pda: PDA]) =
+  echo "attrCb"
+  if par.pda.attrRef != nil:
+    par.pda.attrRef.at[par.row].val = par.pda.attributes[par.row][2].text
+
+    updateAttr(par.pda, par.row)
+    par.pda.paint
+
+
+
+proc showCbCb(w: CheckButton; par: tuple[row: int; pda: PDA]) =
+  if par.pda.attrRef != nil:
+    let nameVis = getActive(par.pda.attributes[par.row][1])
+    let valVis = par.pda.attributes[par.row][3].getActive
+    par.pda.attrRef.at[par.row].nameVis = nameVis
+    updateAttr(par.pda, par.row)
+    par.pda.paint
+
+
+
+
+# puh
+#proc showAttrCb(w: CheckButton; par: (int, PDA)) =
+proc showAttrCb(w: CheckButton; par: tuple[row: int; pda: PDA]) =
+  #echo "showAttrCb", w.getActive
+  #echo par.pda.attributes[par.row][1].getActive
+
+
+  #echo 
+  if par.pda.attrRef != nil:
+    let nameVis = par.pda.attributes[par.row][1].getActive
+    let valVis = par.pda.attributes[par.row][3].getActive
+    par.pda.attrRef.at[par.row].valVis = valVis
+
+
+    echo par.pda.attrRef.at[par.row].text
+    echo par.pda.attrRef.at[par.row].name
+    echo par.pda.attrRef.at[par.row].val
+    #echo  
+    #par.pda.attrRef.at[0].text = "Hallo Hallo"
+    updateAttr(par.pda, par.row)
+    par.pda.paint
+
+
+
 # this proc is large!
 proc newPDA(window: ApplicationWindow): PDA =
   result = newGrid(PDA)
@@ -2084,12 +3234,15 @@ proc newPDA(window: ApplicationWindow): PDA =
   result.vscrollbar.setVExpand
   result.hPaintable.connect("invalidate-size", hscrollbarSizeAllocateCallback, result)
   result.vPaintable.connect("invalidate-size", vscrollbarSizeAllocateCallback, result)
-  result.attach(result.darea, 0, 0, 1, 1)
-  result.attach(result.vscrollbar, 1, 0, 1, 1)
-  result.attach(result.hscrollbar, 0, 1, 1, 1)
+  result.attach(result.darea, 0, 0, 1, 2)
+  result.attach(result.vscrollbar, 1, 0, 1, 2)
+  #result.attach(result.hscrollbar, 0, 2, 1, 1)
+  result.attach(result.hscrollbar, 0, 3, 1, 1)
+
   result.headerbar = newHeaderBar()
   let open = newButton("Open")
   result.headerbar.packStart(open)
+  open.setActionName("win.open")
   result.topbox = newBox(Orientation.horizontal, 0)
   result.topbox2 = newBox(Orientation.horizontal, 0)
   let cbMode = newComboboxText()
@@ -2131,10 +3284,14 @@ proc newPDA(window: ApplicationWindow): PDA =
   result.topbox.append(cbtShape)
 
   let dataDialogButton = newButton("?")
+  dataDialogButton.setTooltipText("Show Data Window")
   dataDialogButton.connect("clicked", openDataDialog, result)
   result.topbox.append(dataDialogButton)
 
   let commandEntry = newEntry()
+  commandEntry.setTooltipText("Command Entry")
+  commandEntry.setPlaceholderText("Pin 100 100 130 100 1 _ 0 100")
+  commandEntry.setWidthChars(commandEntry.getPlaceholderText.len)
   commandEntry.connect("activate", commandEntryActivate, result)
   result.commandEntry = commandEntry
   result.topbox.append(commandEntry)
@@ -2148,6 +3305,7 @@ proc newPDA(window: ApplicationWindow): PDA =
   result.topbox.append(cbtStyle)
 
   let entry = newEntry()
+  entry.setTooltipText("Text Entry")
   entry.connect("activate", entryActivate, result)
   entry.connect("changed", entryChanged, result)
   entry.connect("notify::cursor-position", entryNotify, result)
@@ -2155,8 +3313,10 @@ proc newPDA(window: ApplicationWindow): PDA =
   result.topbox.append(entry)
 
   let world = newEntry()
+  world.setTooltipText("Working Area")
   world.setPlaceholderText(DefaultWorldRange.mapIt(fmt("{it:g}")).join(", "))
-  world.setWidthChars(16)
+  #let xxx = world.getPlaceholderText
+  world.setWidthChars(world.getPlaceholderText.len)
   world.connect("activate", worldActivate, result)
   let worldLabel = newLabel()
   let worldImage = newImageFromIconName("video-display")
@@ -2170,14 +3330,21 @@ proc newPDA(window: ApplicationWindow): PDA =
 
   ### grid entry
   let grid = newEntry()
+  grid.setTooltipText("Grid Entry")
   grid.setPlaceholderText(DefaultGrid.join(", "))
   grid.setWidthChars(16)
   grid.connect("activate", gridActivate, result)
-  let gridLabel = newLabel()
-  gridLabel.setMarkup("<big>\u{25A6}</big>")
+  #let gridLabel = newLabel()
+  #gridLabel.setMarkup("<big>\u{25A6}</big>")
+  result.majorGridLabel = newLabel()
+  result.majorGridLabel.setMarkup("<big>\u{0023}</big>")
+  result.minorGridLabel = newLabel()
+  result.minorGridLabel.setMarkup("<big>\u{25A6}</big>")
+
   let gridButton = newToggleButton()
+  gridButton.setTooltipText("Grid")
   gridButton.connect("toggled", gridToggled, result)
-  gridButton.setChild(gridLabel)
+  gridButton.setChild(result.majorGridLabel)
   result.topbox.append(gridButton)
   result.topbox.append(grid)
   result.gridw = grid
@@ -2459,6 +3626,23 @@ proc newPDA(window: ApplicationWindow): PDA =
   discard action.connect("activate", loadGroup, result)
   actionGroup.addAction(action)
 
+  action = newSimpleAction("create-pcb")
+  discard action.connect("activate", createPCB, result)
+  actionGroup.addAction(action)
+
+  action = newSimpleAction("create-footprint")
+  discard action.connect("activate", createFootprint, result)
+  actionGroup.addAction(action)
+
+
+  action = newSimpleAction("save-all")
+  discard action.connect("activate", saveAll, result)
+  actionGroup.addAction(action)
+
+  action = newSimpleAction("open")
+  discard action.connect("activate", openAll, result)
+  actionGroup.addAction(action)
+
   action = newSimpleAction("detach-text")
   discard action.connect("activate", detachText, result)
   actionGroup.addAction(action)
@@ -2470,6 +3654,16 @@ proc newPDA(window: ApplicationWindow): PDA =
   action = newSimpleAction("edit-text")
   discard action.connect("activate", editText, result)
   actionGroup.addAction(action)
+
+  action = newSimpleAction("escape")
+  discard action.connect("activate", escape, result)
+  actionGroup.addAction(action)
+
+  action = newSimpleAction("delete")
+  discard action.connect("activate", delete, result)
+  actionGroup.addAction(action)
+
+
 
   var v = newVariantBoolean(false)
 
@@ -2501,13 +3695,61 @@ proc newPDA(window: ApplicationWindow): PDA =
   result.headerbar.packEnd(menuButton)
   let save = newButton("Save")
   result.headerbar.packEnd(save)
+  #save.connect("clicked", saveAll)
+  save.setActionName("win.save-all")
+
 
   ###
-  result.attach(result.topbox, 0, -2, 2, 1)
-  result.attach(result.topbox2, 0, -1, 2, 1)
+  result.attach(result.topbox, -1, -2, 3, 1)
+  result.attach(result.topbox2, -1, -1, 3, 1)
   result.botbox = newBox(Orientation.horizontal, 0)
   result.botbox.append(label)
-  result.attach(result.botbox, 0, 2, 2, 1)
+  result.attach(result.botbox, -1, 2, 3, 1)
+
+  # the attributes grid
+  var attrGrid = newGrid()
+  result.attrGrid = attrGrid
+  attrGrid.attach(newLabel("Attributes"), 0, -1, 4, 1)
+  for row in 0 ..< MaxNumAttributes:
+    let cb = newComboboxTextWithEntry()
+    cb.setHExpand(false)
+    let child = cast[Entry](cb.getChild)
+    #cb.setSizeRequest(64, -1)
+    child.setWidthChars(8)
+    for el in Sizes:
+      cb.append(nil, $el)
+    #cb.setActive(0)
+    cb.setSensitive(false)
+    let attr = newEntry()
+    attr.setWidthChars(8)
+    let showCb = newCheckButton()
+    let showAttr = newCheckButton()
+    #attrGrid.attach(cb, 0, 0, 1, 1)
+    attrGrid.attach(cb, 0, row)#, 1, 1)
+    attrGrid.attach(showCb, 1, row, 1, 1)
+    attrGrid.attach(attr, 2, row, 1, 1)
+    attrGrid.attach(showAttr, 3, row, 1, 1)
+    showCb.connect("toggled", showCbCb, (row, result))
+    showAttr.connect("toggled", showAttrCb, (row, result))
+    cb.connect("changed", cbCb, (row, result))
+    attr.connect("changed", attrCb, (row, result))
+    for w in [cb, attr, showCb, showAttr]:
+      w.setSensitive(false)
+
+
+    result.attributes[row] = (cb, showCb, attr, showAttr)
+
+  result.attach(attrGrid, -1, 0, 1, 1)
+  result.attach(layers.createLayersWidget(), -1, 1, 1, 1)
+
+  block:
+    var builder = newBuilderFromString(RmbMenuData)
+    let menuModel = builder.getMenuModel("menuModel")
+    result.popoverMenu = newPopoverMenu(menuModel)
+    result.popoverMenu.setParent(da)
+    #menuButton.setPopover(menu)
+
+
 
 proc startup(app: Application) =
   echo "appStartup"
@@ -2522,11 +3764,28 @@ proc activate(app: Application) =
   window.show
 
 proc newDisplay =
+  #genTQFP()
   let app = newApplication("org.gtk.example")
   app.connect("startup", startup)
   app.connect("activate", activate)
+  setAccelsForAction(app, "win.save-all", "<Control><Shift>S")
+  setAccelsForAction(app, "win.escape", "Escape") # /usr/include/gtk-4.0/gdk/gdkkeysyms.h
+  ###setAccelsForAction(app, "win.delete", "Delete") ugly in popup menu
+  #setAccelsForAction(app, "win.delete", "BackSpace") # we can use only one key per action!
+
+
   let status = app.run
   quit(status)
 
-when isMainModule: # 2531 lines drawLine newComboboxText 100 move newToggleButton activeGrid editText notify drawText newPin newText drawLine styles  newLine style
-  newDisplay() # sqrt Group newVariantBoolean move items filter elements newPad newHole drawPath mapIt
+when isMainModule: # 2623 lines drawLine newComboboxText 100 move newToggleButton activeGrid editText notify drawText newPin newText drawLine styles  newLine style
+  newDisplay() # sqrt Group newVariantBoolean move items filter elements newPad newHole drawPath mapIt grid newToggleButton ups attrGrid
+# groupSelection newButton newApplication saveGroup Group groupAll loadGroup ComboboxtextWithEntry echo showAttribute connect nameVis showAttrCb updateAttrWidgets
+# attachText showAttributes toogle newComboBoxText getActiveText show changed puh newEntry toStrVal puh handlerID grid newToggleButton
+# setAccelsForAction entryActivate newBuilder 7? newPin setTooltipText newButton puh xpairs drawPath save newButton newTrace newComboboxText netr
+ 
+#[ genPad newText
+proc updateAttr drawEl initCountTable drawGrabCirc newNet draw rtree findNearest iterator delete newEntry newPin grid newAdjustment
+findNearest searchObj delete filter iterator locked newPin drawPin offset drawGroup saveAll new Group layers drawNet arc puh newNet
+allElements drawPin newPad genTQFP createFootprint newGroup drawPad setLineCap newPad newCirc GerberPad LineendCap LineCaps
+createPCB moveGroup Group creategroup delete newTree pda.tree roundToGrid newPin
+]#

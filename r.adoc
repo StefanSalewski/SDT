@@ -1,0 +1,23 @@
+= Schematics mode
+
+== Creating Pins
+
+To create a Pin interactively, select the Pins mode, and klick on the Pin start position, move the mouse
+to the pin end position, and click again. The pin will get a default number and name attribute.
+
+To modify the number and name, you can select the pin, and then use the attributes widget to modify the values.
+You can move the whole pin, or one of its endpoints to change its orientation. The position of the name
+and number attribute is adjusted automaically. You  may also detach the attributes, move them, and reatach them.
+But whenever you move the Pin, the attributes are again automatically adjusted.
+
+For creating many pins, you can use the command entry widget. Enter a command like
+
+pin x1 y1 x2 y2 number name dx dy n
+
+This will create a set of n pins, all with name "name" and starting with number "number",
+displaced by dx and dx.
+x1 and y1 are absolute coordinates, while x2 and y2 can be absolute values, or offsets
+to x1 and y1, when the value starts with a plus sign.
+For name you can use "_" -- in that case the actual names are read from the
+data window. The command works without the starting "pin" symbol when the Pins mode is selected.
+When you intent to create only a single pin, then the last three parameters are not necessary.
