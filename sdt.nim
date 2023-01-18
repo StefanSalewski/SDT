@@ -7,9 +7,9 @@
 #
 # Main goal of this tool is to make fun using it.
 #
-# (c) S. Salewski 2020, 2021, 2022, 2023
+# (c) S. Salewski 2020, 2021, 2022
 # License MIT
-# v0.1 2023-JAN-15
+# v0.1 2022-MAR-19
 
 import std/[times, parseutils, strutils, strformat, strscans, json, macros]#, json, jsonutils]
 #import yaml/serialization, streams
@@ -517,7 +517,7 @@ type
 type
   Group = ref object of Element
     #els: seq[Element]
-    silks: seq[GerberSilk]
+    silk: seq[GerberSilk]
     lines: seq[Line]
     circs: seq[Circ]
     texts: seq[Text]
@@ -530,16 +530,6 @@ type
     nets: seq[Net]
     groups: seq[Group]
     origin: V2 # for inserting, origin is aligned with grid
-
-const
-  #AllGroupFields = "silks lines circs  texts rects pads holes paths pins traces nets groups".split
-  AllGroupFields = ["silks", "lines",  "circs",  "texts", "rects", "pads", "holes", "paths", "pins", "traces", "nets", "groups"]
-
-
-static: # can we somehow generate AllGroupFields?
-  let g = Group()
-  for n, el in g[].fieldPairs:
-    discard # echo "aaaaaaaaaa", n
 
 type
   UserAction {.pure.} = enum
@@ -643,7 +633,7 @@ macro addItFields(fields: openArray[string]; o: untyped): untyped =
     insert(body(o), body(o).len, node)
   result = o
 
-iterator items(g: Group): Element {.addItFields(AllGroupFields).} =
+iterator items(g: Group): Element {.addItFields(["lines", "rects", "circs"]).} =
   discard
 # ]#
 
@@ -942,21 +932,18 @@ proc cairoDevRound(w: float): float =
     floor((w + 0.5) mod 2) / 2 # if odd(round(w)): 0.5 else: 0
 
 # [
-#macro genGroupMove(g: static[string]; fields: varargs[untyped]): untyped =
-macro genGroupMove(g: static[string]): untyped =
+macro genGroupMove(g: static[string]; fields: varargs[untyped]): untyped =
   var s: string
-  for f in AllGroupFields:
-    s.add("for el in " & g & "." & f & ":\n")
+  for f in fields:
+    s.add("for el in " & g & "." & f.repr & ":\n")
     s.add("  move(el, dxdy)\n")
-  echo s
   result = parseStmt(s)
 # ]#
 
 # we may use the items() iterator instead
 proc move(g: Group; dxdy: V2) =
   move(Element(g), dxdy)
-  genGroupMove("g")
-  #genGroupMove("g", lines, silks, rects, circs, pads, holes, pins, texts, traces, paths, groups) # puh
+  genGroupMove("g", lines, rects, circs, pads, holes, pins, texts, traces, paths, groups)
 #[
   for el in g.els:
     if el of Group:
@@ -1681,13 +1668,6 @@ proc drawGroup(g: Group; pda: PDA; scale: float = 1.0; offset: float = 0.0) =
     setW(l)
     drawTrace(l, pda)
     pda.cr.stroke
-
-  for l in g.silks:
-    setW(l)
-    drawGerberSilk(l, pda)
-    pda.cr.stroke
-
-
   for l in g.groups:
     echo "drawGroup(l, pda, scale, offset)"
     drawGroup(l, pda, scale, offset)
@@ -2656,26 +2636,26 @@ proc genTQFP(pda:PDA) =
   let w = 0.2 # 0.2 mm ink width
   x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -cps2 / 2 - cpl / 2 + w / 2
-  g.silks.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
-  g.silks.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
 
-  g.silks.add(genGerberSilk(x1 - cpw, y1 + cpl, x1 - cpw, y1 + cpl, pitch, LineCap.round))
+  g.silk.add(genGerberSilk(x1 - cpw, y1 + cpl, x1 - cpw, y1 + cpl, pitch, LineCap.round))
 
 
   #x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -y1# -cps2 / 2 - cpl / 2 + w / 2
-  g.silks.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
-  g.silks.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
 
   x1 = -x1#-cps1 / 2 - cpl / 2 + w / 2
   #y1 = -cps2 / 2 - cpl / 2 + w / 2
-  g.silks.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
-  g.silks.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
 
   #x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -y1#-cps2 / 2 - cpl / 2 + w / 2
-  g.silks.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
-  g.silks.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
 
 
   g.move([50.0, 50])
@@ -2741,26 +2721,26 @@ proc newTQFP(pda:PDA): Group =
   let w = 0.2 # 0.2 mm ink width
   x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -cps2 / 2 - cpl / 2 + w / 2
-  g.silks.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
-  g.silks.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
 
-  g.silks.add(genGerberSilk(x1 - cpw, y1 + cpl, x1 - cpw, y1 + cpl, pitch, LineCap.round))
+  g.silk.add(genGerberSilk(x1 - cpw, y1 + cpl, x1 - cpw, y1 + cpl, pitch, LineCap.round))
 
 
   #x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -y1# -cps2 / 2 - cpl / 2 + w / 2
-  g.silks.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
-  g.silks.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
 
   x1 = -x1#-cps1 / 2 - cpl / 2 + w / 2
   #y1 = -cps2 / 2 - cpl / 2 + w / 2
-  g.silks.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
-  g.silks.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
 
   #x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -y1#-cps2 / 2 - cpl / 2 + w / 2
-  g.silks.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
-  g.silks.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.silk.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
 
 
   #g.move([50.0, 50])
@@ -2878,10 +2858,10 @@ CAPC4532_EIA_1812_METRIC_4532_450x320 1812 5.30 3.50 0.90 3.80 3.00 5.55 4.05 ±
   gr.p.add([f / 2, g / 2])
   f -= w
   g -= w
-  gr.silks.add(genGerberSilk(-f / 2, -g / 2, f / 2, -g / 2, 2 * w, LineCap.round)) # top
-  gr.silks.add(genGerberSilk(-f / 2,  g / 2, f / 2,  g / 2, 2 * w, LineCap.round)) # bottom
-  gr.silks.add(genGerberSilk(-f / 2, -g / 2, -f / 2, g / 2, 2 * w, LineCap.round)) # left
-  gr.silks.add(genGerberSilk( f / 2,  g / 2, f / 2,  -g / 2, 2 * w, LineCap.round)) # right
+  gr.silk.add(genGerberSilk(-f / 2, -g / 2, f / 2, -g / 2, 2 * w, LineCap.round)) # top
+  gr.silk.add(genGerberSilk(-f / 2,  g / 2, f / 2,  g / 2, 2 * w, LineCap.round)) # bottom
+  gr.silk.add(genGerberSilk(-f / 2, -g / 2, -f / 2, g / 2, 2 * w, LineCap.round)) # left
+  gr.silk.add(genGerberSilk( f / 2,  g / 2, f / 2,  -g / 2, 2 * w, LineCap.round)) # right
   var el: TreeEl = (boxEl(gr, pda), gr)
   pda.tree.insert(el)
   pda.paint
@@ -3824,5 +3804,5 @@ when isMainModule: # 2623 lines drawLine newComboboxText 100 move newToggleButto
 proc updateAttr drawEl initCountTable drawGrabCirc newNet draw rtree findNearest iterator delete newEntry newPin grid newAdjustment
 findNearest searchObj delete filter iterator locked newPin drawPin offset drawGroup saveAll new Group layers drawNet arc puh newNet
 allElements drawPin newPad genTQFP createFootprint newGroup drawPad setLineCap newPad newCirc GerberPad LineendCap LineCaps
-createPCB moveGroup Group creategroup delete newTree pda.tree roundToGrid newPin els more items drawSilk puh
+createPCB moveGroup Group creategroup delete newTree pda.tree roundToGrid newPin els
 ]#
