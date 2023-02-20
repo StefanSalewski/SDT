@@ -7,9 +7,8 @@
 #
 # Main goal of this tool is to make fun using it.
 #
-# (c) S. Salewski 2020, 2021, 2022
-# License MIT
-# v0.1 2022-MAR-19
+# (c) S. Salewski 2020, 2021, 2022, 2023
+# v0.1 2023-FEB-12
 
 import std/[times, parseutils, strutils, strformat, strscans, json, macros]#, json, jsonutils]
 #import yaml/serialization, streams
@@ -17,7 +16,7 @@ import std/[times, parseutils, strutils, strformat, strscans, json, macros]#, js
 import std/tables
 from std/math import round, floor, `^`, `mod`
 from std/sugar import `=>`
-from std/sequtils import mapIt, applyIt, filter
+from std/sequtils import mapIt, applyIt, filter, keepItIf
 import gintro/[gtk4, gdk4, glib, gobject, gio, cairo, pango, pangocairo]
 import rtree
 import salewski, minmax #xpairs
@@ -41,7 +40,8 @@ const
 const
   DefaultWindowSize = (2400, 1800)
   #DefaultWorldRange = [0.0, 0, 600, 400]
-  DefaultWorldRange = [-50.0, -50, 100, 100]
+  #DefaultWorldRange = [-50.0, -50, 100, 100]
+  DefaultWorldRange = [-100.0, -100, 200, 200]
   DefaultGrid = [100.0, 10, 100, 10]
   HairLineWidth = 0.2 # mm
   ThinHairLineWidth = 0.1 # mm
@@ -128,6 +128,16 @@ const menuData = """
           <attribute name="label">Create PCB</attribute>
           <attribute name="action">win.create-pcb</attribute>
         </item>
+
+
+        <item>
+          <attribute name="label">Gen. Netlists</attribute>
+          <attribute name="action">win.genNetlists</attribute>
+        </item>
+
+
+
+
 
         <item>
           <attribute name="label">Detach Text</attribute>
@@ -305,6 +315,9 @@ proc `+`(a, b: V2): V2 =
 proc `-`(a, b: V2): V2 =
   [a[0] - b[0], a[1] - b[1]]
 
+proc abs(a: V2): float =
+  math.sqrt(a[0] * a[0] + a[1] * a[1])
+
 proc jecho(x: varargs[string, `$`]) =
   for el in x:
     stdout.write(el & " ")
@@ -324,6 +337,9 @@ proc deTwin(s: var seq[V2]) =
   s.setLen(d + 1)
 
 ### helper procs for strscan module
+proc parseAll(input: string; name: var string; start: int; seps: set[char] = {}): int =
+  name = input[start .. input.high]
+
 proc parseToSep(input: string; name: var string; start: int; seps: set[char] = {' ',',',';','\t'}): int =
   while start + result < input.len and input[start + result] notin {' ',',',';','\t'}:
     inc(result)
@@ -506,6 +522,7 @@ type
 
 type
   Pin = ref object of PathLike # Element
+    sym: string # Symbolname, extracted from at of group
 
 type
   Hole = ref object of Element
@@ -517,7 +534,7 @@ type
 type
   Group = ref object of Element
     #els: seq[Element]
-    silk: seq[GerberSilk]
+    silks: seq[GerberSilk]
     lines: seq[Line]
     circs: seq[Circ]
     texts: seq[Text]
@@ -530,6 +547,16 @@ type
     nets: seq[Net]
     groups: seq[Group]
     origin: V2 # for inserting, origin is aligned with grid
+
+const
+  #AllGroupFields = "silks lines circs  texts rects pads holes paths pins traces nets groups".split
+  AllGroupFields = ["silks", "lines",  "circs",  "texts", "rects", "pads", "holes", "paths", "pins", "traces", "nets", "groups"]
+
+
+static: # can we somehow generate AllGroupFields?
+  let g = Group()
+  for n, el in g[].fieldPairs:
+    discard # echo "aaaaaaaaaa", n
 
 type
   UserAction {.pure.} = enum
@@ -622,7 +649,7 @@ type
     popoverMenu: PopoverMenu
 
 # [
-macro addItFields(fields: openArray[string]; o: untyped): untyped =
+macro addItFields(fields: static[openArray[string]]; o: untyped): untyped =
   expectKind(o, nnkIteratorDef)
   let objName = o.params[1][0]
   for f in fields:
@@ -633,7 +660,7 @@ macro addItFields(fields: openArray[string]; o: untyped): untyped =
     insert(body(o), body(o).len, node)
   result = o
 
-iterator items(g: Group): Element {.addItFields(["lines", "rects", "circs"]).} =
+iterator items(g: Group): Element {.addItFields(AllGroupFields).} =
   discard
 # ]#
 
@@ -932,18 +959,21 @@ proc cairoDevRound(w: float): float =
     floor((w + 0.5) mod 2) / 2 # if odd(round(w)): 0.5 else: 0
 
 # [
-macro genGroupMove(g: static[string]; fields: varargs[untyped]): untyped =
+macro genGroupMove(g: static[string]; fields: static[openArray[string]]): untyped =
+#macro genGroupMove(g: static[string]): untyped =
   var s: string
   for f in fields:
-    s.add("for el in " & g & "." & f.repr & ":\n")
+    s.add("for el in " & g & "." & f & ":\n")
     s.add("  move(el, dxdy)\n")
+  echo s
   result = parseStmt(s)
 # ]#
 
 # we may use the items() iterator instead
 proc move(g: Group; dxdy: V2) =
   move(Element(g), dxdy)
-  genGroupMove("g", lines, rects, circs, pads, holes, pins, texts, traces, paths, groups)
+  genGroupMove("g", AllGroupFields)
+  #genGroupMove("g", lines, silks, rects, circs, pads, holes, pins, texts, traces, paths, groups) # puh
 #[
   for el in g.els:
     if el of Group:
@@ -1272,6 +1302,18 @@ proc paint(pda: PDA; queueDraw = true) =
     pda.darea.queueDraw
 
 
+proc breakOfGroup(g: Group; pda: PDA) =
+  var box: TreeBox
+  var gb: TreeEl
+  for el in items(g):
+  #for el in g.els:
+    box = boxEl(el, pda)
+    gb = (box, el)
+    pda.tree.insert(gb)
+  #gb = (boxEl(g, pda), g)
+  #discard pda.tree.delete(gb)
+  pda.paint # not necessary?
+
 
 proc fileChooserOpenResponseCb(d: FileChooserDialog; id: int; pda: PDA) =
   if ResponseType(id) == ResponseType.accept:
@@ -1283,11 +1325,12 @@ proc fileChooserOpenResponseCb(d: FileChooserDialog; id: int; pda: PDA) =
     let dx = roundToMultiple(n.int.float * pda.grid[0], pda.grid[0])
     n = (cy - g.p[0][1]) / pda.grid[2]
     let dy = roundToMultiple(n.int.float * pda.grid[2], pda.grid[2])
-    g.move([dx, dy])
-    var  box: TreeBox = [(g.p[0][0], g.p[1][0]), (g.p[0][1], g.p[1][1])]
-    var gb: TreeEl = (box, g)
-    pda.tree.insert(gb)
-    pda.paint
+    #########g.move([dx, dy])
+    #var  box: TreeBox = [(g.p[0][0], g.p[1][0]), (g.p[0][1], g.p[1][1])]
+    #var gb: TreeEl = (box, g)
+    #pda.tree.insert(gb)
+    breakOfGroup(g, pda)
+    #pda.paint
   d.destroy
 
 proc openAll(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
@@ -1327,10 +1370,16 @@ proc genTQFP(pda: PDA)
 
 proc genCAPC(pda: PDA)
 
+proc genDIP(pda: PDA)
+
+proc genRAxial(pda:PDA)
+
 proc createFootprint(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
   echo "createFootprint"
   genCAPC(pda)
+  genDIP(pda)
   genTQFP(pda)
+  genRAxial(pda)
 
 
 proc schToPCB(pda: PDA) =
@@ -1340,9 +1389,142 @@ proc schToPCB(pda: PDA) =
       for t in el.at:
         echo t.name
 
+# AllGroupFields = ["silks", "lines",  "circs",  "texts", "rects", "pads", "holes", "paths", "pins", "traces", "nets", "groups"]
+iterator groupsRec(g: Group): Element =
+  for el in g.lines:
+    yield el
+  for el in g.pins:
+    yield el
+  for el in g.silks:
+    yield el
+  for el in g.circs:
+    yield el
+  for el in g.texts:
+    yield el
+  for el in g.rects:
+    yield el
+  for el in g.pads:
+    yield el
+  for el in g.holes:
+    yield el
+  for el in g.paths:
+    yield el
+  for el in g.traces:
+    yield el
+  for el in g.nets:
+    yield el
+  for gg in g.groups:
+    for el in gg.lines:
+      yield el
+    for el in gg.pins:
+      yield el
+    for el in gg.silks:
+      yield el
+    for el in gg.circs:
+      yield el
+    for el in gg.texts:
+      yield el
+    for el in gg.rects:
+      yield el
+    for el in gg.pads:
+      yield el
+    for el in gg.holes:
+      yield el
+    for el in gg.paths:
+      yield el
+    for el in gg.traces:
+      yield el
+    for el in gg.nets:
+      yield el
+
+iterator allRec2(tree: Tree): Element =
+  for el in tree.elements:
+    if el of Group:
+      for x in groupsRec(Group(el)):
+        yield x
+    else:
+      yield el
+
+iterator allRec3(tree: Tree): Element =
+  for el in tree.elements:
+    if el of Group:
+      for x in groupsRec(Group(el)):
+        yield x
+    #else:
+    yield el
+
+# recursion is still missing
+iterator groupsRec(tree: Tree): Group =
+  for el in tree.elements:
+    if el of Group:
+      yield Group(el)
+      #for x in groupsRec(Group(el)):
+      #  yield x
+    #else:
+    #yield el
+
+# find all connected net segments on which pins may be located.
+proc genNetList(nets: seq[Net]; pins: Table[V2, Pin]; result: var seq[string]; n: Net)  =
+  if n.selected:
+    return
+  n.selected = true
+  for c in nets:
+    if c == n:
+      continue
+    for po in [0, 1]: # both ends of candidate c
+      #let op = 1 - po 
+      var d, v, u, x, y: float
+      (d, v, u, x, y) = distanceLinePointSqr(n.p[0], n.p[1], c.p[po])
+      if v < 1:
+        genNetList(nets, pins, result, c)
+  for c in values(pins):
+    var d, v, u, x, y: float
+    (d, v, u, x, y) = distanceLinePointSqr(n.p[0], n.p[1], c.p[0])
+    if v < 1:
+      #echo c.sym, ":", c.at[0].val
+      result.add(c.sym & ":" & c.at[0].val)
+
+type
+  NetList = seq[seq[string]]
+
+proc genNetlists(tree: Tree): NetList =
+  var
+    pins: Table[V2, Pin]
+    nets: seq[Net]
+    col: seq[string]
+  for el in tree.allRec2:
+    if el of Pin:
+      let el = Pin(el)
+      assert not pins.hasKey(el.p[0])
+      pins[el.p[0]] = el
+    elif el of Net:
+      el.selected = false
+      nets.add(Net(el))
+  for el in tree.allRec2:
+    if el of Net:
+      col.setLen(0)
+      genNetList(nets, pins, col, Net(el))
+      if col.len > 0:
+        result.add(col)
+  #echo col
+
+proc genPinNames(tree: Tree) =
+  for el in tree.groupsRec:
+    if el of Group:
+      var symname: string # e.g. OP2 or R37
+      for s in el.at:
+        if s.name == "Ref": # make case insensitive
+          symname = s.val
+          break
+      for p in Group(el).pins:
+        p.sym = symname
 
 
 
+proc genNetlists(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
+  echo "genNetlists"
+  genPinNames(pda.tree)
+  echo genNetlists(pda.tree)
 
 proc breakUpGroup(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
   var g: Group
@@ -1628,14 +1810,17 @@ proc drawGroup(g: Group; pda: PDA; scale: float = 1.0; offset: float = 0.0) =
 
 
 
-  #[
-  for layer in 0 .. layers.layers.high:
-    for el in g.els:
-      if el.layer == layer:
-        el.drawEl(pda, scale, offset)
-  ]#
 
-# [
+  for layer in 0 .. layers.layers.high:
+    #echo "bbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    for el in g.items:
+      #echo "hhhhh"
+      #if el of Line: echo "aaaaaaaaaaaaaaaaaaaaaaab"
+      if true:#el.layer == layer:
+        el.drawEl(pda, scale, offset)
+
+
+#[
   for l in g.lines:
     setW(l)
     drawLine(l, pda)
@@ -1668,11 +1853,18 @@ proc drawGroup(g: Group; pda: PDA; scale: float = 1.0; offset: float = 0.0) =
     setW(l)
     drawTrace(l, pda)
     pda.cr.stroke
+
+  for l in g.silks:
+    setW(l)
+    drawGerberSilk(l, pda)
+    pda.cr.stroke
+
+
   for l in g.groups:
     echo "drawGroup(l, pda, scale, offset)"
     drawGroup(l, pda, scale, offset)
     pda.cr.stroke
-# ]#
+]#
 
 
   drawAttachedText(g, pda)
@@ -2513,6 +2705,8 @@ proc genGerberPad(x1, y1, x2, y2, w: float; n: int; cap: LineCap): GerberPad =
   return pad
 
 
+#iterator genGerberSilk(x, y, w: float; cap: LineCap): GerberSilk =
+#  for i in 0 .. 3:
 
 
 
@@ -2636,26 +2830,26 @@ proc genTQFP(pda:PDA) =
   let w = 0.2 # 0.2 mm ink width
   x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -cps2 / 2 - cpl / 2 + w / 2
-  g.silk.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
-  g.silk.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
 
-  g.silk.add(genGerberSilk(x1 - cpw, y1 + cpl, x1 - cpw, y1 + cpl, pitch, LineCap.round))
+  g.silks.add(genGerberSilk(x1 - cpw, y1 + cpl, x1 - cpw, y1 + cpl, pitch, LineCap.round))
 
 
   #x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -y1# -cps2 / 2 - cpl / 2 + w / 2
-  g.silk.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
-  g.silk.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
 
   x1 = -x1#-cps1 / 2 - cpl / 2 + w / 2
   #y1 = -cps2 / 2 - cpl / 2 + w / 2
-  g.silk.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
-  g.silk.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
 
   #x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -y1#-cps2 / 2 - cpl / 2 + w / 2
-  g.silk.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
-  g.silk.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
 
 
   g.move([50.0, 50])
@@ -2667,6 +2861,7 @@ proc genTQFP(pda:PDA) =
 
 
 proc newTQFP(pda:PDA): Group =
+  # https://ww1.microchip.com/downloads/aemDocuments/documents/corporate-responsibilty/environmental/material-compliance-documents/64L_TQFP_10x10_with_5_7x5_7_EP_JVX_C04-435A.pdf
   # Name, Contact Pitch, Contact Pad Spacing, Contact Pad Spacing, Contact Pad Width, Contact Pad Length, Number of Leads
   var input, name: string
   var pitch, cps1, cps2, cpw, cpl: float
@@ -2721,26 +2916,26 @@ proc newTQFP(pda:PDA): Group =
   let w = 0.2 # 0.2 mm ink width
   x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -cps2 / 2 - cpl / 2 + w / 2
-  g.silk.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
-  g.silk.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
 
-  g.silk.add(genGerberSilk(x1 - cpw, y1 + cpl, x1 - cpw, y1 + cpl, pitch, LineCap.round))
+  g.silks.add(genGerberSilk(x1 - cpw, y1 + cpl, x1 - cpw, y1 + cpl, pitch, LineCap.round))
 
 
   #x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -y1# -cps2 / 2 - cpl / 2 + w / 2
-  g.silk.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
-  g.silk.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1 + cpl - w, y1, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
 
   x1 = -x1#-cps1 / 2 - cpl / 2 + w / 2
   #y1 = -cps2 / 2 - cpl / 2 + w / 2
-  g.silk.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
-  g.silk.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1, y1 - cpl + w, w, LineCap.round))
 
   #x1 = -cps1 / 2 - cpl / 2 + w / 2
   y1 = -y1#-cps2 / 2 - cpl / 2 + w / 2
-  g.silk.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
-  g.silk.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1 - cpl + w, y1, w, LineCap.round))
+  g.silks.add(genGerberSilk(x1, y1, x1, y1 + cpl - w, w, LineCap.round))
 
 
   #g.move([50.0, 50])
@@ -2768,19 +2963,41 @@ proc findPadWithNumber(g: Group; num: string): Pad =
         return Pad(el)
 
 
+proc findHoleWithNumber(g: Group; num: string): Hole =
+  echo "findHoleWithNumber", num
+  result = nil
+  for el in g.holes:
+    if el of Hole:
+      echo el.at[0].val, num
+      if el.at[0].val == num:
+        return Hole(el)
+
+
 iterator pins(g: Group): Pin =
   for el in g.pins:
     if el of Pin:
       yield Pin(el) 
 
+proc newDIP(pda:PDA): Group
 
 proc findSymbols(pda: PDA) =
   var footprints: seq[Element]
   for el in pda.tree.elements:
     if el of Group:
       for t in el.at:
-        if t.name == "footprint":
-          let h = newTQFP(pda)
+        if t.name == "Footprint":
+          echo "footprint found"
+          #let h = newTQFP(pda)
+          let h = newDIP(pda)
+          #let dex = find(
+          #if Group(el).at
+          for x in Group(el).at:
+            if x.name == "Ref":
+              for y in h.at:
+                if y.name == "Name":
+                  y.val = x.val
+                  y.text = x.val
+              #h.at.add(newText([0.0, 0], [0.0, 0], "7?", "num", "7?"))
           for p in pins(Group(el)):
             echo p.at[PinNamePos].name, " :: ", p.at[PinNamePos].val
             if p.at[PinNamePos].val != "":
@@ -2789,6 +3006,13 @@ proc findSymbols(pda: PDA) =
                 echo ">>>", pad.at[1].val, p.at[PinNamePos].val
                 pad.at[1].val = "xxx"#p.at[PinNamePos].val
                 pad.at[1].text = "xxx"
+
+              let hole = h.findHoleWithNumber(p.at[PinNumberPos].val)
+              if hole != nil:
+                echo ">>>", hole.at[1].val, p.at[PinNamePos].val
+                hole.at[1].val = p.at[PinNamePos].val#p.at[PinNamePos].val
+                hole.at[1].text = p.at[PinNamePos].val
+
               #let i = h.findAttrIndex(p.at[PinNamePos].val)
               
 
@@ -2858,10 +3082,116 @@ CAPC4532_EIA_1812_METRIC_4532_450x320 1812 5.30 3.50 0.90 3.80 3.00 5.55 4.05 ±
   gr.p.add([f / 2, g / 2])
   f -= w
   g -= w
-  gr.silk.add(genGerberSilk(-f / 2, -g / 2, f / 2, -g / 2, 2 * w, LineCap.round)) # top
-  gr.silk.add(genGerberSilk(-f / 2,  g / 2, f / 2,  g / 2, 2 * w, LineCap.round)) # bottom
-  gr.silk.add(genGerberSilk(-f / 2, -g / 2, -f / 2, g / 2, 2 * w, LineCap.round)) # left
-  gr.silk.add(genGerberSilk( f / 2,  g / 2, f / 2,  -g / 2, 2 * w, LineCap.round)) # right
+  gr.silks.add(genGerberSilk(-f / 2, -g / 2, f / 2, -g / 2, 2 * w, LineCap.round)) # top
+  gr.silks.add(genGerberSilk(-f / 2,  g / 2, f / 2,  g / 2, 2 * w, LineCap.round)) # bottom
+  gr.silks.add(genGerberSilk(-f / 2, -g / 2, -f / 2, g / 2, 2 * w, LineCap.round)) # left
+  gr.silks.add(genGerberSilk( f / 2,  g / 2, f / 2,  -g / 2, 2 * w, LineCap.round)) # right
+  var el: TreeEl = (boxEl(gr, pda), gr)
+  pda.tree.insert(el)
+  pda.paint
+
+
+# https://kicad.github.io/footprints/Package_DIP
+# https://www.analog.com/media/en/package-pcb-resources/package/pkg_pdf/pdipn/n_8.pdf
+proc newDIP(pda:PDA): Group =
+  var input, name, comment: string
+  var w, l, p, d: float # width, length, pitch, drill
+  var n: int # num pins
+  let h = "DIP-8_W7.62mm 7.62 10.16 2.54 0.6 8 8-lead though-hole mounted DIP package, row spacing 7.62 mm (300 mils)"
+  input = h
+  let res = scanf(input, "${parseToSep}$[sep]$f$[sep]$f$[sep]$f$[sep]$f$[sep]$i$[sep]${parseAll}", name, w, l, p, d, n, comment)
+  let gr = Group()
+  var x, y: float
+  x = -w / 2
+  y = -p * (n.float - 2) / 4
+  var dy = p
+  for i in 1 .. n:
+    let v = [x, y]
+    let hole = newHole([x - d / 2, y], [x + d / 2, y])
+    hole.dia = 2 * d
+    hole.drill = d
+    hole.at[HoleNamePos] = newText(v, v, "name")
+    hole.at[HoleNumberPos] = newText(v, v, $i)
+    hole.at[HoleNamePos].sizeInPixel = true
+    hole.at[HoleNumberPos].sizeInPixel = true
+    gr.holes.add(hole)
+    if i == n div 2:
+      y += dy
+      dy = -dy
+      x = -x
+    y += dy
+  x = -w / 2
+  y = -l / 2
+  gr.silks.add(genGerberSilk(x - p / 2, y, x - p / 2, y, p / 4,  LineCap.round)) # pin 1 mark
+  gr.silks.add(genGerberSilk(x, y, -x, y, 0.3,  LineCap.round))
+  gr.silks.add(genGerberSilk(x, -y, -x, -y, 0.3,  LineCap.round))
+  x = -p / 2
+  y =  -l / 2
+  gr.silks.add(genGerberSilk(x, y, 0, y - x, 0.3,  LineCap.round)) # body mark
+  gr.silks.add(genGerberSilk(-x, y, 0, y - x, 0.3,  LineCap.round))
+  gr.p.add([-w / 2, -l / 2]) # box
+  gr.p.add([ w / 2,  l / 2])
+  var v = [-w / 2, -l / 2]
+  var t = newText(v, v, "?", "Name", "?")
+  t.style = medium
+  t.nameVis = false
+  t.gy = 2
+  gr.at.add(t)
+  v = [-w / 2, l / 2]
+  t = newText(v, v, name, "FP", name)
+  t.style = medium
+  t.nameVis = false
+  t.gy = 0
+  gr.at.add(t)
+  return gr
+
+proc genDIP(pda:PDA) =
+  let gr = newDIP(pda)
+  let el: TreeEl = (boxEl(gr, pda), gr)
+  pda.tree.insert(el)
+  pda.paint
+
+# https://klc.kicad.org/footprint/f3/f3.2/
+# R_Axial_L[Length]_D[Diameter]_P[Pitch]_[Modifiers]_[Orientation]_[Options]
+# R_Axial_L3.6mm_D1.6mm_P2.54mm_Vertical
+# https://eepower.com/resistor-guide/resistor-standards-and-codes/resistor-sizes-and-packages/
+# we use
+# R_Axial_L6.5mm_D2.5mm_P7.62mm_W0.25_LD0.6
+#
+proc genRAxial(pda:PDA) =
+  var input, name: string
+  var size: int
+  var l, w, p, d: float
+  let h = "R_Axial_L6.5mm_D2.5mm_P7.62mm_W0.25_LD0.6 6.5 2.5 10.16 0.6"
+  let gr = Group()
+  input = h
+  let res = scanf(input, "${parseToSep}$[sep]$f$[sep]$f$[sep]$f$[sep]$f", name, l, w, p, d)
+  d += 0.2
+  echo name
+  echo l, w, p, d
+  
+  for x in [-p * 0.5, p * 0.5]:
+    let v = [x, 0]
+    let hole = newHole([x, 0], [x, 0])
+    hole.dia = 2 * d
+    hole.drill = d
+    hole.at[HoleNamePos] = newText(v, v, "name")
+    hole.at[HoleNumberPos] = newText(v, v, "num")
+    hole.at[HoleNamePos].sizeInPixel = true
+    hole.at[HoleNumberPos].sizeInPixel = true
+    gr.holes.add(hole)
+
+  gr.silks.add(genGerberSilk(-l / 2, -w / 2, l / 2, -w / 2, d / 2, LineCap.round)) # top
+  gr.silks.add(genGerberSilk(-l / 2,  w / 2, l / 2,  w / 2, d / 2, LineCap.round)) # bottom
+  gr.silks.add(genGerberSilk(-l / 2, -w / 2, -l / 2, w / 2, d / 2, LineCap.round)) # left
+  gr.silks.add(genGerberSilk( l / 2,  w / 2, l / 2, -w / 2, d / 2, LineCap.round)) # right
+
+  var x  = p * 0.5 - 1.5 * d
+  gr.silks.add(genGerberSilk(-x,  0, -l / 2,  0, d / 2, LineCap.round))
+  gr.silks.add(genGerberSilk( x,  0,  l / 2,  0, d / 2, LineCap.round))
+  x = p * 0.5 + d
+  gr.p.add([-x, -w / 2]) # box
+  gr.p.add([x,   w / 2])
   var el: TreeEl = (boxEl(gr, pda), gr)
   pda.tree.insert(el)
   pda.paint
@@ -2912,11 +3242,24 @@ proc pinCommand(input: string; pda: PDA) =
   x2 += x1 * px2.float
   y2 += y1 * py2.float
   var h = pda.textData.split
+  echo "???"
+  echo pda.textData.toHex
+  echo h
   for i in 0 ..< n:
     let pad = newPin([x1, y1], [x2, y2])
+    #pad.at[PinNumberPos].text = $num
+    #result.at.add(newText(p1, p2, "7?", "num", "7?"))
+    #result.at.add(newText(p1, p2, "Name", "name", "Name"))
     pad.at[PinNumberPos].text = $num
+    pad.at[PinNumberPos].val = $num
+
+
     if name == "_" and i < h.len:
+      echo "---", h[i]
       pad.at[PinNamePos].text = h[i]
+      pad.at[PinNamePos].val = h[i]
+
+
     var el: TreeEl = (boxEl(pad, pda), pad)
     pda.tree.insert(el)
     if dy != dy:
@@ -3082,7 +3425,9 @@ proc dataDialogResponseCb(d: Dialog; id: int; pda: PDA) =
   #echo "response: ", ResponseType(id)
   if ResponseType(id) == ResponseType.ok:
     ### var buffer: TextBuffer = TextView(d.getContentArea.getFirstChild.getFirstChild).getBuffer # that would work too
-    pda.textData = pda.textDataBuffer.getText(pda.textDataBuffer.getStartIter, pda.textDataBuffer.getEndIter, true)
+    pda.textData = pda.textDataBuffer.getText(pda.textDataBuffer.getStartIter, pda.textDataBuffer.getEndIter, false).replace("\x0D\x0A", "\n")
+    #pda.textData.replace("\x0D\x0A", "\n")
+
     #echo pda.textData
     #discard
   d.destroy
@@ -3652,6 +3997,13 @@ proc newPDA(window: ApplicationWindow): PDA =
   actionGroup.addAction(action)
 
 
+  action = newSimpleAction("genNetlists")
+  discard action.connect("activate", genNetlists, result)
+  actionGroup.addAction(action)
+
+
+
+
   action = newSimpleAction("save-all")
   discard action.connect("activate", saveAll, result)
   actionGroup.addAction(action)
@@ -3800,9 +4152,11 @@ when isMainModule: # 2623 lines drawLine newComboboxText 100 move newToggleButto
 # attachText showAttributes toogle newComboBoxText getActiveText show changed puh newEntry toStrVal puh handlerID grid newToggleButton
 # setAccelsForAction entryActivate newBuilder 7? newPin setTooltipText newButton puh xpairs drawPath save newButton newTrace newComboboxText netr
  
-#[ genPad newText
+#[ genPad newText proc drawGroup *** macro drawPin genNetlists Table newHole drawHole jecho DIP at newText drawText newText
 proc updateAttr drawEl initCountTable drawGrabCirc newNet draw rtree findNearest iterator delete newEntry newPin grid newAdjustment
 findNearest searchObj delete filter iterator locked newPin drawPin offset drawGroup saveAll new Group layers drawNet arc puh newNet
 allElements drawPin newPad genTQFP createFootprint newGroup drawPad setLineCap newPad newCirc GerberPad LineendCap LineCaps
-createPCB moveGroup Group creategroup delete newTree pda.tree roundToGrid newPin els
+createPCB moveGroup Group creategroup delete newTree pda.tree roundToGrid newPin els more items drawSilk puh visible draw for els
+hhhhh saveAll open createPCB genNetList newPin genpcb newTQFP findSymbols
+
 ]#
