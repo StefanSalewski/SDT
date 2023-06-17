@@ -1,0 +1,254 @@
+= Simple Drawing Tool
+(c) Stefan Salewski 2021                                     
+//Version 0.1 SEP 2021
+:experimental:
+:imagesdir: http://ssalewski.de/tmp
+:source-highlighter: pygments
+:pygments-style: monokai
+:icons: font
+
+image::sdt1.png[]
+
+This is a simple 2D drawing and construction tool.
+
+Written in the Nim programming language using GTK4, Cairo, Pango.
+
+The tool is in a very early stage still.
+
+This tool shall provide the basic functionality for various CAD (Computer aided design)
+and EDA (electronic design automation) related tools.
+
+Some existing tools, i.e. the gEDA/PCB suite, suffer from issues like
+
+- complicated usage
+- ugly look
+- large, complicated source code
+
+This project was initially started in 2010 to replace the gschem schematics editor of the gEDA tool suite.
+The initial attempt was written in Ruby using GTK, Cairo, and Pango for the GUI. Trying to be compatible with the
+legacy gschem/PCB file format made the program a bit restricted and complicated, and the Ruby programming language was not really the ideal choice
+ due to low performance and dynamic typing. In the last years some new programming languages became available which
+ provide high performance, high level language constructs and good readability. We decided to use the Nim language, but there are
+ some alternatives now.
+ 
+As GUI we are using still GTK with Cairo and Pango for drawing. Using GTK makes some sense as our main target system
+is Linux. Currently we are using Cairo for the vector drawing and Pango for text rendering. Cairo is known to be not very fast, but
+offers good quality and has the advantage of providing SVG and PDF backends. Later we may use Blend2d as a faster cairo substitute
+or maybe OpenGL based libraries like SDL2.
+
+The main goals for this tool are
+
+- nice, clean look
+- really simple usage
+- short, easy source code
+
+The nice clean looks follows from the use of GTK4 and Cairo/Pango, as long as we do not pollute the GUI with too many
+widgets and dialog windows. And we avoid highlighting selected elements with a single selection color, which is
+a very unnatural way. Instead we use a brighter color with shadow effects.
+
+The Nim programming language makes it possible to write short and easy to understand source code.
+
+For the simple usage of the tool we try to make the user interaction as natural as possible, and we try
+to avoid modal behaviour. All common basic operations should be available without a need for mode changes
+or of opening of additional dialog windows.
+
+Later the tool may get various skins, i.e. a mechanical CAD skin, a schematics editor skin and a PCB layout tool skin.
+The PCB layout editor will be supported by a topological rubberband autorouter, so that not much special functionality will be
+needed. 
+
+In this early stage of the tool we do not care much about the exact layout of the GUI -- we just put
+needed widgets somewhere on the screen. Later we will group the widgets, and we may display
+different widget sets for the various skins of the tool.
+
+== Basic usage
+
+NOTE: This is a description of the intended usage. Most of it will not work yet.
+
+As this tool is in a very early stage still there is no package manager support. On a Linux box with GTK libs
+and Nim compiler installed you may try this tool in this way:
+
+----
+nimble install gintro
+git clone https://github.com/stefansalewski/SDT.git
+cd SDT
+nim c --gc:arc sdt.nim
+./sdt
+----
+
+Currently we start the tool from terminal without arguments. On startup a drawing area with nominal
+size 600 x 400 is created. At the top of the window we have a set of different widgets. The GtkEntry right to
+the computer screen pictogram is used to change the size and position of the available drawing area.
+We can enter coordinates this way:
+
+----
+s
+sx sy
+x1 y1 +s
+x1 y1 +sx +sy
+x1 y1 x2 y2
+----
+
+The numeric values are float or integer literals separated by whitespace, comma or semicolon.
+
+One single number gives an area of that size with start coordinates set to zero, and two literals
+specify a x and y extent. When we enter two ordinary literals and one or two values starting with a plus character, then
+the first two numbers specify the origin of the coordinate system and the values starting with the plus
+specify the extent. And finally, when we give four ordinary values, then these are the lower and upper
+x, y coordinates.
+
+The coordinate origin is currently the left upper edge of the window, but later we may make
+the origin location customizable.
+
+On the right side of the grid button there is a similar GtkEntry widget that is used to select the actual grid size.
+We use a large and a small grid, which can be set to different vales for x and y direction. You may enter literal
+values like
+
+----
+S
+Sx Sy
+Sx sx Sy sy
+----
+
+for large grid size, large x/y grid size and full spezification. If you do not give the small grid,
+it is set to one tenth of the large one. The toggle button left to this GtkEntry determines if the
+large or small grid is currently active. When you draw shapes or move elements, the position
+snaps to grid points.
+
+== Entering shapes
+
+Currently these shapes are available: Line, rectangle, circle, path and text. You select one of then 
+by use ofvthe GtkCombobox.
+
+Line: Click with LMB on the start position, move the mouse and click on the end position.
+You can move the whole line or one of the line endpoints by a grab operation: Move the mouse
+pointer over the line segment or over one of its endpoints, press the LMB, move the mouse and release the LMB.
+
+Rectangle: Click on a position to specify one corner, move the mouse and press click again to
+specify the opposite rectangle corner. You can resize the rectangle by grabbing its sides or its corners.
+
+Circle: Click on the desired center, move the mouse and click on a point on its desired radius.
+
+Path: Click on a start position, move the mouse, click to define the next point. Click again
+on the last entered point to terminate the operation. As for the line, you can grab
+the whole path or points of the path to modify the position or the shape.
+
+Text: Click into the drawing area to start entering the text. A GtkEntry will
+grab focus, and entered text is printed on the drawing area. You can use the
+cursor keys to navigate in the string and the delete key to delete characters.
+Press enter to terminate the text input operation.
+
+=== Issues
+
+A click with the LMB on an element selects it -- later we will need this selection for special operations.
+As the mouse click is absorbed for selection, we can not start a line on an existing object. Current solution is that
+first click selects the element, and second click starts the new line. Maybe later we will find a better solution?
+
+=== Object capture mode
+
+Additional to snap coordinates to grid points, we will also support
+capture to existing objects. For lines, start point of new line segments
+may snap to existing lines. A wide snap range may make it possible to
+start new line on existing line ends, without having to select the old line first.
+
+== Styles
+
+We have decided to avoid the use of multiple independent attributes for objects
+like line width and color, but use predefined and user defined styles instead.
+The reason is, that i.e. for creating  nice looking diagrams it is not a good idea to
+choose random color values and line width independently. But it is better
+to have some styles like default, thin, thick, headline. For tool skins like PCB or schematic
+editor this is even more true, we would use a style net, pin, frame, label and such.
+Using styles avoids a cluttered look and makes it easy to modify the whole
+diagram, maybe by increasing the line width of the default style from 0.2mm to 0.5mm.
+
+The use of styles is currently restricted, you can select one from the ComboBox, but we
+can not yet create new styles.
+
+== Generating new styles -- as intended
+
+We just enter the name of the new style in a GtkEntry widget. Parameters of new style
+like color, line width and font are used from corresponding property widgets and a
+new style is appended to the styles GtkComboBox.
+
+== Style parameters
+
+We have a widget set to select a color, font, linewidth and such. These values are applied when we create
+new styles, or the values are used direct when style None is selected.
+
+== Groups
+
+Single objects can be grouped so that they behave like a single entity. You can select
+some elements and then select "create group" from the pulldown menu. This works currently
+only for lines and circles.
+
+== Layers 
+
+Later we will get layer support. We will be able to look layers, make layers invisible
+and move objects from one layer to a different one.
+
+== Command entry
+
+We will have a command entry widget. A command like
+"Line x1 y1 x2 y2" will create a new line. This is very useful for creating
+pins and pads. For Pads the command is "pad x1 y1 x2 y2 dx dy N Num Name".
+This will create N pads each with a displacement of dx, dy, and increased pad number.
+Creating pins will work similar.
+
+== Schematic Mode
+
+For Schematic mode grid size should be 10, so that length of pins is 20 or 30.
+When we draw a pin, its get a number and a label text automatically aligned.
+By default we can only select the pin itself, not the attached strings. But we can detach
+the strings, edit or translate them, and later reattach.
+
+== Attached text attributes
+
+We can attach text attributes to all objects. WE create the object, the text object, select
+both and then choose "attach text" from menu. Som eobjects has attached text by default,
+i.e. Pins and pads has a number and a name attached. Arrached text can not be grabbed or selected
+directly, it moves with the parent object. We can select an object and choose "dettach text" from menu
+to dettach all text so that we can edit it.
+
+== Text sizes
+
+Text size is given in points, that is 1/72 inch. When we zoom in, text size increases in the same way
+as length or width ol line segments would increase. The question is how textsize will
+behave when we increase the sheet size, e.g. when we draw a schematic and have to increse the sheet
+to add more components. WE will have too types of text -- one will preserve size, the other will
+srink in the same way as all other elements will shrink when we increase sheet size.
+
+In PCB mode, text annotations of pads or pins will have a special size. Pad text will adapt to pad size,
+and text attached to pins (number and name) will match pin size.
+
+== Command entry
+
+We have a GtkText widget where we can enter command, e.g. to create pads or pins.
+
+=== Pad entry
+
+We enter a command like
+
+x1, y1, x2, y2, r, num, name, dx, dy, n
+
+x1, y1, x2, y2 are the two opposite corners of the pad, and r is the radius of the pad corners.
+Entering r is currently necessary, but that value is ignored for now.
+Num is the pad number, name is the name of the pad. Name is an optional string containing beginning with
+a letter. dx and dy are an displacement for the next pad, and n tells how many pads should be created.
+Pads are numbered by inceasing num. We can put a '-' in front of num, then num is decreased instead.
+
+=== Hole entry
+
+Pins in PCB mode are currently called holes.
+You can enter a command to create some holes like
+
+hole x y dia drill num  name dx dy n
+
+x/y position, copper and drill diameter, a number and a name. And when creating
+more than one hole the x, y displacement and the number of holes. The leading hole
+string is not necessary when the hole mode is already active. The x or y values can start with a plus sign
+to indicate a oval copper area, which provides more mechanically stability. Holes get a copper ring on the solder side
+by default -- current idea is that for multi-layer boards copper rings are added when traces start or end at the hole
+position. In hole mode holes can be entered with the mouse by clicking on a location -- a fixed copper diameter and drill diameter
+is used in this case.  Currently the hole command has to start with "hole ", a plus sign or at least one whitespace due to a strscan.scanf()
+restriction (no optional capturing parameter support). test
+ 
