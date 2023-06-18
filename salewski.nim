@@ -1,3 +1,4 @@
+import std/math
 #
 # https://github.com/nim-lang/Nim/blob/devel/lib/system/iterators.nim#L1
 # https://forum.nim-lang.org/t/4582#28715
