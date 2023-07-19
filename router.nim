@@ -1,3 +1,4 @@
+#
 # File: router.nim
 # A rubberband topological router based on the region concept mentioned in
 # Tal Dayan's PhD thesis and other papers.
@@ -552,15 +553,17 @@ proc OKsortAttachedNets(v: XVertex) =
     v.attachedNets.sort do (a, b: Step) -> int:
           result = cmp(a.index, b.index)
 
-# 2023-JUN-13: Can we clean it up?
 proc sortAttachedNets(v: XVertex) =
   if v.attachedNets.len > 1:
-    if v.attachedNets.len == 2 and v.attachedNets[0].outer != v.attachedNets[1].outer: # shortcut should work
-      return
+    #if v.attachedNets.len == 2 and v.attachedNets[0].outer != v.attachedNets[1].outer: # shortcut should work
+    #  return
     for n in items(v.attachedNets):
       assert(n.vertex == v)
       #assert n.lrturn == (n.rgt == n.outer) # there are exceptions on PCB boards?
-      n.index = innerAngle(v, n) * (int(n.outer) * 2 - 1).float
+      #n.index = innerAngle(v, n) * (int(n.outer) * 2 - 1).float
+      n.index = -innerAngle(v, n)
+      if n.outer:
+        n.index = -n.index - math.TAU
       echo v.xid, " ", n.index
     v.attachedNets = v.attachedNets.sortedByIt(it.index)
     if v.attachedNets.mapIt(it.index).deduplicate(isSorted = true).len == v.attachedNets.len:
@@ -1614,7 +1617,7 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
             #let nd = (newDistance + distances[pom] + hhh.cap) / 2
             let nd = (hypot(w.vertex.x - u.vertex.x, w.vertex.y - u.vertex.y) + distances[pom] + 0 * newDistance) / 1
             if nd < newDistance: # caution, this may give diagonals instead straight connections for PCB pads! 20230408
-              discard#newDistance = [nd, minOldDistance[3]].max
+              newDistance = [nd, minOldDistance[3]].max
           else:
             if lcuts.len > 0: # can (only) occur for outer vertices of PCB rectangle
               #let nv = lcuts.minBy{|el| r.newcuts[v.vertex, el].cap}
@@ -2135,6 +2138,19 @@ proc prepareSteps*(r: Router) =
         step.radius = vert.radius - net.traceWidth / 2
         vert.separation = net.traceClearance
 
+
+proc xxprepareSteps*(r: Router) =
+  for vert in r.vertices:
+    if vert.attachedNets.len == 0:
+      continue
+    vert.resetInitialSize
+    #for b in [true, false]:
+    var r = vert.radius
+    for step in vert.attachedNets:
+      r += 1.2
+      step.radius = r
+
+
 proc sortAttachedNets*(r: Router) =
   for vert in r.vertices:
     vert.sortAttachedNets
@@ -2379,7 +2395,7 @@ proc main() =
   r.setColor(1, 0, 0, 0.7)
   r.setLineWidth(1)
   # [0,1,2,3,4,5,6,7,8,9].each{|i|
-  for i in [3, 4, 5, 6, 7, 8, 9]:#, 8, 9]: # [3, 4, 5, 6, 7]:#,1,2,3,4,5,6]:#,7,8,9]:
+  for i in [2, 3, 4, 5, 6, 7, 8, 9]:#, 8, 9]: # [3, 4, 5, 6, 7]:#,1,2,3,4,5,6]:#,7,8,9]:
     r.setColor(col[i mod 5][0], col[i mod 5][1], col[i mod 5][2], 0.4)
     #discard r.route(strutils.parseInt(paramStr(1)))
     discard r.route(i)
@@ -2387,7 +2403,7 @@ proc main() =
   r.sortAttachedNets
   r.prepareSteps
 
-  r.nubly()
+  #r.nubly()
   r.nubly(true)
   r.prepareSteps
 #[
