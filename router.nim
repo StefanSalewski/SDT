@@ -37,7 +37,7 @@
 ]#
 
 import std/[sets, tables, hashes, random, times, heapqueue]
-from std/math import `^`, round, arctan2, hypot, Tau, arccos, almostEqual
+from std/math import `^`, round, arctan2, hypot, Tau, arccos, almostEqual, sqrt
 from std/os import paramCount, paramStr
 from std/strutils import parseInt
 from std/sequtils import filter, mapIt, anyIt, applyIt, keepItIf, filterIt, delete, toSeq, deduplicate
@@ -324,6 +324,18 @@ proc newStep(prev, nxt: XVertex; xid: int): Step =
   s.outer = false
   return s
 
+
+proc triangleArea2(a, b, o: Region): float =
+  var
+    ox = o.vertex.x
+    oy = o.vertex.y
+    ax = a.vertex.x - ox
+    ay = a.vertex.y - oy
+    bx = b.vertex.x - ox
+    by = b.vertex.y - oy
+  return (ax * by - ay * bx).abs
+
+
 #     b
 #    ^
 #   /
@@ -334,7 +346,7 @@ proc xbooleanReallySmartCrossProduct2dWithOffset(a, b, o: Region): bool =
     ax = a.vertex.x + a.ox
     ay = a.vertex.y + a.oy
     bx = b.vertex.x + b.ox
-    by = b.vertex.y + b.ox
+    by = b.vertex.y + b.oy ##################################### TYPO!!!
     ox = o.vertex.x
     oy = o.vertex.y
   failif(ax == bx and ay == by) # undefined result, we should raise an exeption!
@@ -772,7 +784,7 @@ type
     regions: seq[Region]
     allRoutes: seq[seq[(float, float)]]
     #rstyles
-    file: File # pcbLayoutDataFile
+    #file: File # pcbLayoutDataFile
     edgesInCluster: Table[(XVertex, XVertex), int] # diagonal edge in pad/cluster, forbidden path, we may consider removing it from triagulation
     cdt*: dt.DelaunayTriangulation
     newcuts: Table[(XVertex, XVertex), Cut]
@@ -1054,15 +1066,16 @@ proc drawVertices*(r: Router) =
 
 proc genVias(r: Router) =
   for v in r.vertices:
-    if v.via:
-      r.file.write("Via[#{v.x.round} #{v.y.round} #{(2 * v.core).round} #{Clearance.round} #{0} #{1000} \"\" \"\"]\n")
+    discard
+    #if v.via:
+    #  r.file.write("Via[#{v.x.round} #{v.y.round} #{(2 * v.core).round} #{Clearance.round} #{0} #{1000} \"\" \"\"]\n")
 
 proc genLine(r: Router; x0, y0, x1, y1, w: float) =
   r.pic.setLineWidth(w)
   r.pic.moveTo(x0, y0)
   r.pic.lineTo(x1, y1)
   r.pic.stroke
-  r.file.write("Line[#{x0.round} #{y0.round} #{x1.round} #{y1.round} #{w.round} #{Clearance.round} \"\"]\n")
+  #r.file.write("Line[#{x0.round} #{y0.round} #{x1.round} #{y1.round} #{w.round} #{Clearance.round} \"\"]\n")
   
 proc genLineX(cr: Context; x0, y0, x1, y1, w: float) =
   cr.setLineWidth(w)
@@ -1083,8 +1096,8 @@ proc genArc(r: Router; x, y: float; ra, frm, to, width: float) =
       to += 2 * math.PI
   let pcbStartAngle = ((math.PI - frm) * 180 / math.PI).round
   let pcbDeltaAngle = ((frm - to) * 180 / math.PI).round # never positive -- maybe we should flip angles?
-  if pcbDeltaAngle != 0:
-    r.file.write("Arc[#{x.round} #{y.round} #{r.round} #{r.round} #{width.round} #{Clearance.round} #{pcbStartAngle} #{pcbDeltaAngle} \"\"]\n")
+  #if pcbDeltaAngle != 0:
+  #  r.file.write("Arc[#{x.round} #{y.round} #{r.round} #{r.round} #{width.round} #{Clearance.round} #{pcbStartAngle} #{pcbDeltaAngle} \"\"]\n")
 
 proc genArcX(cr: Context; x, y: float; ra, frm, to, width: float) =
   var to = to
@@ -1541,7 +1554,7 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
         #cm = [u.neighbors, w.neighbors].map{|el|
         # Tex.new(el.inject(0){|sum, n| sum + n.vertex.x}.fdiv(el.length), el.inject(0){|sum, n| sum + n.vertex.y}.fdiv(el.length))
         #}
-        #next if cm.find{|el| el.x == v.vertex.x && el.y == v.vertex.y} # see note (1.) above
+        #next if cm.find{|el| el.x == v.vertex.x && el.y == v.vertex.y} # see nonlyOuterote (1.) above
         #next if cm[0].x == cm[1].x && cm[0].y == cm[1].y # can this occur?
         #lrTurn = RBR::booleanReallySmartCrossProduct_2dWithOffset(cm[0], cm[1], v.vertex) # left or right turn?
         #lcuts = Array.new # we need an empty lcuts array for outer turn
@@ -1578,10 +1591,13 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
       let outerDistance = newDistance # save this value
       ### outerDistance = oldDistance + 1 * Math.hypot(w.vertex.x - x, w.vertex.y - y) # maybe some "scaling" ?
       var canOut = onlyOuter
-      if not (onlyOuter) and not distances.contains(wVRgt):
+      #if not (onlyOuter) and not distances.contains(wVRgt):
+      if not (onlyOuter):# and not distances.contains(wVRgt):
         block blocked:
           # process test with <canOut = true> clauses first!
           var lcuts: seq[XVertex] = newBorList(u, w, v) # neighbours in the inner angle/lane
+          assert(u.vertex notin lcuts)
+          assert(w.vertex notin lcuts)
           if vcid >= 0: # at corner of pad/cluster
             #if true:#
             if lcuts.anyIt(it.cid == vcid) or (u.vertex.cid == vcid and w.vertex.cid == vcid and lcuts.len == 0):
@@ -1615,7 +1631,11 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
           let hhh = r.newcuts.getOrDefault((w.vertex, u.vertex), nil) # looking for shorter paths
           if true:#hhh != nil:
             #let nd = (newDistance + distances[pom] + hhh.cap) / 2
-            let nd = (hypot(w.vertex.x - u.vertex.x, w.vertex.y - u.vertex.y) + distances[pom] + 0 * newDistance) / 1
+            #let nd = (hypot(w.vertex.x - u.vertex.x, w.vertex.y - u.vertex.y) + distances[pom] + 0 * newDistance) / 1
+            echo "aaaa", triangleArea2(u, v, w), " ", triangleArea2(u, w, v)
+            assert almostEqual(triangleArea2(u, v, w), triangleArea2(u, w, v), 1000)
+            #let nd = hypot(w.vertex.x - u.vertex.x, w.vertex.y - u.vertex.y) + distances[pom] + triangleArea2(u, v, w).sqrt * 0.02 # malus for big triangle? Not a good idea
+            let nd = hypot(w.vertex.x - u.vertex.x, w.vertex.y - u.vertex.y) + distances[pom]
             if nd < newDistance: # caution, this may give diagonals instead straight connections for PCB pads! 20230408
               newDistance = [nd, minOldDistance[3]].max
           else:
@@ -1639,41 +1659,32 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
             parents[wVRgt] = min # record the path for backtracking
             distances[wVRgt] = newDistance
       #if false: ##################################################################
-      if useOuter and not distances.contains(wVXrgt): # try outer path
+      #if useOuter and not distances.contains(wVXrgt): # try outer path
+      if useOuter:# and not distances.contains(wVXrgt): # try outer path
         curRgt = not curRgt
         newDistance = outerDistance
         block blocked:
-        #notBlocked = catch(:blocked){
-          # lcuts = v.vertex.neighbors - (lcuts || newBorList(u, w, v)) - [u.vertex, w.vertex]
           if lcuts.len == 0:
             lcuts = newBorList(u, w, v)
-          lcuts = v.vertex.neighbors - (lcuts & @[u.vertex, w.vertex]) # ugly!
-#[
-          var xxx: seq[XVertex]
-          if lcuts.len != 0:
-            xxx = lcuts
-          else:
-            discard#xxx = newBorList(u, w, v)
-          xxx &= [u.vertex, w.vertex]
-          lcuts.setLen(0)
-          for el in v.vertex.neighbors: # also ugly :-)
-            if el notin xxx:
-              lcuts.add(el)
-]#
-          # new 2023 APR 04
+          lcuts = v.vertex.neighbors - (lcuts & @[u.vertex, w.vertex])
           if vcid >= 0: # at corner of pad/cluster
-            #if true:#
-            #if (u.vertex.cid == vcid and w.vertex.cid == vcid and lcuts.len == 0):
-            if lcuts.anyIt(it.cid == vcid):# or (u.vertex.cid == vcid and w.vertex.cid == vcid and lcuts.len == 0):
-            #if lcuts.find{|el| el.cid == vcid} || (u.vertex.cid == vcid && w.vertex.cid == vcid && lcuts.empty?) # do we need && lcuts.empty? For concave cluster maybe?
-              #canOut = true
+            if lcuts.anyIt(it.cid == vcid): # avoid inner diagonals in pads and clusters. Is that necessary?
               break blocked
-          #squeeze = lcuts.inject(0){|sum, el| if (h = @newcuts[v.vertex, el].squeezeStrength(netDesc.traceWidth, netDesc.traceClearance)) >= MBD; break h end; sum + h}
           var sum = 0.0
-          for el in lcuts:
-            var h = squeezeStrength(r.newcuts[(v.vertex, el)], netDesc.traceWidth, netDesc.traceClearance) / 1
-            sum += h
+          for el in lcuts: ######## puh distanceLinePoint
+            assert el.x != u.vertex.x or el.y != u.vertex.y
+            assert el.x != v.vertex.x or el.y != v.vertex.y
+            assert el.x != w.vertex.x or el.y != w.vertex.y
+            #var h = squeezeStrength(r.newcuts[(v.vertex, el)], netDesc.traceWidth, netDesc.traceClearance)
+            sum += squeezeStrength(r.newcuts[(v.vertex, el)], netDesc.traceWidth, netDesc.traceClearance)
             if sum >= MBD: break
+            when true: # for the outer lane, we may touch vertices in rare cases. The distance is currently only an approximation
+              let d1 = max(u.vertex.core, v.vertex.core) + 2 * el.core + netDesc.traceWidth + 3 * netDesc.traceClearance
+              if normalDistanceLineSegmentPointSquared(u.vertex.x, u.vertex.y, v.vertex.x, v.vertex.y, el.x, el.y) < d1 ^ 2:
+                break blocked
+              let d2 = max(v.vertex.core, w.vertex.core) + 2 * el.core + netDesc.traceWidth + 3 * netDesc.traceClearance
+              if normalDistanceLineSegmentPointSquared(v.vertex.x, v.vertex.y, w.vertex.x, w.vertex.y, el.x, el.y) < d2 ^ 2:
+                break blocked
           var squeeze = sum
           if squeeze >= MBD: break blocked
           if (u != startNode) and (curRgt != prevRgt):
@@ -2251,7 +2262,7 @@ proc nubly*(r: Router; collapse = false) =
 
 proc drawRoutes*(r: Router; layer = 0) =
 
-  discard r.file.open("layer_#{2 - layer}.pcb", fmwrite)
+  #discard r.file.open("layer_#{2 - layer}.pcb", fmwrite)
   if layer == 0:
     r.genVias()
   r.pic.setSource(0, 0, 0, 1)
@@ -2396,6 +2407,7 @@ proc main() =
   r.setLineWidth(1)
   # [0,1,2,3,4,5,6,7,8,9].each{|i|
   for i in [2, 3, 4, 5, 6, 7, 8, 9]:#, 8, 9]: # [3, 4, 5, 6, 7]:#,1,2,3,4,5,6]:#,7,8,9]:
+  #for i in [8]:#, 8, 9]: # [3, 4, 5, 6, 7]:#,1,2,3,4,5,6]:#,7,8,9]:
     r.setColor(col[i mod 5][0], col[i mod 5][1], col[i mod 5][2], 0.4)
     #discard r.route(strutils.parseInt(paramStr(1)))
     discard r.route(i)
@@ -2427,7 +2439,7 @@ when isMainModule:
   Clearance = 1.3 
   main()
 # 2275 lines float dup text proc popom find vcid cid cornersfix dijkstra lineTo random genArcX dijkstra pic Router arc kkk drawRoutesX
-# neighbors cornerfix drawRoutesX  drawRoutesX 88 fullAngle lrTurn outer echo
+# neighbors cornerfix drawRoutesX  drawRoutesX 88 fullAngle lrTurn outer echo triangleArea2 `-` openArray
 
 #[
             for el in rep:
