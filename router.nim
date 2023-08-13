@@ -1437,12 +1437,11 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
   var outerLane: Table[(Region, Region, bool), bool] # record if we used inner or outer trail
   distances[(startNode, nil, true)] = 0 # fake left and right turn before start node
   distances[(startNode, nil, false)] = 0
-  var (x, y) = startNode.vertex.xy
   var startCid = startNode.vertex.cid # cluster xid, -1 means no pad/cluster but plain pin
   for w, useInner, useOuter in startNode.qbors(nil): # initial steps are never blocked, so fill them in
     let u = (w, startNode, false) # for rgt == true and rgt == false, so we can continue in all directions
     let v = (w, startNode, true)
-    var newpri: float = (if (startCid != -1) and (w.vertex.cid == startCid): 0.0 else: hypot(w.vertex.x - x, w.vertex.y - y))
+    var newpri: float = (if (startCid != -1) and (w.vertex.cid == startCid): 0.0 else: hypot(w.vertex.x - startNode.vertex.x, w.vertex.y - startNode.vertex.y))
     if startnode.vertex.cid >= 0 and startnode.vertex.cid != w.vertex.cid:
       newpri += startnode.vertex.cornerfix
     q.push((w, startNode, false, newpri))
@@ -1455,50 +1454,34 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
   var oldDistance: float
   while true:
     if q.len == 0:
-      return #nil
-    let minOldDistance = q.pop # what when empty?
-    let (v, uu, prevRgt, oldDistance) = minOldDistance
+      return # return empty result
+    let (v, uu, prevRgt, oldDistance) = q.pop # minOldDistance
     min = (v, uu, prevRgt)
     assert(v != nil and uu != nil)
-    if distances.hasKey(min) and distances[min] < minOldDistance[3]:
+    #if distances.getOrDefault(min, Inf) < oldDistance: # we should need this?
+    if distances[min] < oldDistance: # ignore old, invalid heapqueue entries (as we cannot update the heapqueue)
       echo "continue"
       continue
     let hhh = (if (uu == startNode) or (uu.vertex.cid == startCid and startCid != -1): 0.0 else: uu.vertex.radius + [uu.vertex.separation, netDesc.traceClearance].max + netDesc.traceWidth / 2)
-    var pom = parents.getOrDefault(min, RRbNil) # parent of min
-    var popom = parents.getOrDefault(pom, RRbNil)
-    var popom0: Region
+    var pom = parents[min] # pareants of min
+    var popom = parents.getOrDefault(pom, RRbNil) # pareants of pom
     var popomv: XVertex
-    if popom != RRbNil:
-      popom0 = popom[0]
-    if popom0 != nil:
-      popomv = popom0.vertex
+    if popom[0] != nil:
+      popomv = popom[0].vertex
     let reachedDestCluster = netDesc.destCid > -1 and v.vertex.cid == netDesc.destCid
-    if reachedDestCluster:
-      discard
     if (v.vertex.name == endNodeName or reachedDestCluster) and v.incident: # reached destination -- check if we touched a vertex
       let hhht: (float, float, float, float) = getTangents(uu.vertex.x, uu.vertex.y, hhh, prevRgt, v.vertex.x, v.vertex.y, 0, false) # last two arguments are arbitrary
-      var blocked = false
       for el in uu.vertex.neighbors & v.vertex.neighbors:
         if el.cid == -1 or (el.cid != uu.vertex.cid and el.cid != v.vertex.cid) and el != popomv: # is this useful here?
           if normalDistanceLineSegmentPointSquared(hhht[0], hhht[1], hhht[2], hhht[3], el.x, el.y) < (el.radius + [el.separation, netDesc.traceClearance].max + netDesc.traceWidth / 2) ^ 2:
-            blocked = true
             break
-      if blocked:
-        discard#continue
       # for now avoid long twisted paths which may block others
-      if minOldDistance[3] > 10 * AVD and minOldDistance[3] > maxDetourFactor * hypot(v.vertex.x - startNode.vertex.x, v.vertex.y - startNode.vertex.y):
+      if oldDistance > 10 * AVD and oldDistance > maxDetourFactor * hypot(v.vertex.x - startNode.vertex.x, v.vertex.y - startNode.vertex.y):
         echo "refused"
         return #nil
-      break # useless here
+      break
     let vcid = v.vertex.cid
-    distances[min] = minOldDistance[3]
-    let (x, y) = v.vertex.xy
-    pom = parents[min] # parent of min
-    popom = parents.getOrDefault(pom, RRbNil)
-    if popom != RRbNil:
-      popom0 = popom[0]
-    if popom0 != nil:
-      popomv = popom0.vertex
+    distances[min] = oldDistance
     let u = pom[0]
     assert u == uu
     var path: HashSet[Region] # prevent loops
@@ -1540,7 +1523,7 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
         # hhh = true if !(el.nstep && el.pstep) && (el.vertex == u.vertex)
         #}
       else:
-        if path.contains(w):
+        if path.contains(w): # we may not really need this test, and the whole path HashSet
           continue
       var lcuts: seq[XVertex]
       var lrTurn: bool
@@ -1582,7 +1565,7 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
             distances[el] = oldDistance
       if onlyOuter and vcid > -1: # corner of cluster, inner path not allowed, outer also forbidden!
         continue
-      var newDistance = minOldDistance[3] + hypot(w.vertex.x - x, w.vertex.y - y)
+      var newDistance = oldDistance + hypot(w.vertex.x - v.vertex.x, w.vertex.y - v.vertex.y)
       if startnode.vertex.cid >= 0 and startnode.vertex.cid == v.vertex.cid and startnode.vertex.cid != w.vertex.cid:
         newDistance += v.vertex.cornerfix
         #continue
@@ -1637,7 +1620,7 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
             #let nd = hypot(w.vertex.x - u.vertex.x, w.vertex.y - u.vertex.y) + distances[pom] + triangleArea2(u, v, w).sqrt * 0.02 # malus for big triangle? Not a good idea
             let nd = hypot(w.vertex.x - u.vertex.x, w.vertex.y - u.vertex.y) + distances[pom]
             if nd < newDistance: # caution, this may give diagonals instead straight connections for PCB pads! 20230408
-              newDistance = [nd, minOldDistance[3]].max
+              newDistance = [nd, oldDistance].max
           else:
             if lcuts.len > 0: # can (only) occur for outer vertices of PCB rectangle
               #let nv = lcuts.minBy{|el| r.newcuts[v.vertex, el].cap}
@@ -1649,7 +1632,7 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
                 nd = hypot(u.vertex.x - w.vertex.x, u.vertex.y - w.vertex.y)
               nd = (newDistance + distances[pom] + nd) / 2
               if nd < newDistance:
-                newDistance = [nd, minOldDistance[3]].max
+                newDistance = [nd, oldDistance].max
           if false: # outerLane.hasKey((v, u, prevRgt)) and (curRgt != (prevRgt xor outerLane[(v, u, prevRgt)])): # wiggly line
             newDistance += AVD # this does not really improve the routing in all situations, so better disable it.
           #newDistance += squeeze
