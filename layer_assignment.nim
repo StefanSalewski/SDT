@@ -77,7 +77,7 @@ type
   Segment = ref object
     x1*, y1*, x2*, y2*: float
     intersectingSegments: seq[Segment]
-    layer: Layer
+    layer*: Layer
     isActive: bool # maybe use increasing int to avoid initialization to false? May cover fresh as well
 
 type
@@ -202,7 +202,7 @@ type
     viaPositions: seq[(float, float)] # array of x, y pairs, along a path from startNode to endNode
     viaThickness: float
     viaClearance: float
-    viaCost: float = 3.0
+    viaCost: float = 0.0 #3.0
     startNode: SNode
     endNode: TNode
     segmentList: seq[Segment]

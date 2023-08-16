@@ -1,6 +1,6 @@
 # Plain CAD tool using Nim, GTK and Cairo
 # (c) S. Salewski 2020, 2021, 2022, 2023
-# v0.2 2023-JUN-17
+# v0.2 2023-AUG-13
 #
 # Basic drawing area behaviour like zooming, scrolling and panning is based on gintro/examples/gtk3/drawingarea.nim
 # which again is based on an earlier Ruby implementation
@@ -2862,6 +2862,7 @@ proc routePCB(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
   pda.layerAssignment.savePicture
   pda.routed = true
   let r = newRouter(-200, -200, 250, 250)
+  var tab: Table[V2, XVertex]
   pda.router = r
   for el in pda.tree.elements:
     if el of Group:
@@ -2874,19 +2875,22 @@ proc routePCB(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
           v.cid = GCid
           if i > 3:
             v.cornerfix = 0.01
-          discard r.cdt.insertPoint(Vector(x: v.x, y: v.y), v)
+          tab[[c[0], c[1]]] = XVertex(r.cdt.insertPoint(Vector(x: v.x, y: v.y), v))
 
   # #########################
   echo "gdone"
   # generate the net desk list
 
-  var tab: Table[V2, XVertex]
+
   var hnl: seq[array[4, float]]
   for n in pda.layerAssignment.output2nets: # ignore style for now
     for s in n.path:
+      echo "GH", s.layer
       # if s.layer == layer: # actually do this for all the layers
+      #if s.layer == 0:
       hnl.add([s.x1, s.y1, s.x2, s.y2])
   for iii, el in pairs(hnl):
+    echo iii, "ZZZ", router.VertexClassID, " ", r.cdt.subdivision.vertices.len
     var (x1, y1, x2, y2) = (el[0], el[1], el[2], el[3])
     jecho "BBB", x1, y1, x2, y2
     var v1: XVertex
@@ -2920,6 +2924,7 @@ proc routePCB(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
       v2.name = fff & 'e'
     var netDesc = NetDesc(t1Name:v1.name, t2Name: v2.name, destCid: v2.cid)
     r.netlist.add(netDesc)
+  echo "ZZZ", router.VertexClassID
   r.finishInit
   r.filename = "pic" & ".png"
   #r.drawVertices
@@ -4012,5 +4017,5 @@ proc newDisplay =
   let status = app.run
   quit(status)
 
-when isMainModule: # 3977 lines Delete paste newGroup saveGroup loadGroup newNet
+when isMainModule: # 3977 lines Delete paste newGroup saveGroup loadGroup newNet routePCB
   newDisplay()

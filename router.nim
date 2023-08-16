@@ -971,15 +971,18 @@ type
 
 proc finishInit*(r: Router; rndTest = false) =
   r.vertices = newSeq[XVertex]()
-  r.regions = newSeq[Region](723)
+  r.regions = newSeq[Region](1723)
   for v in r.cdt.subdivision.vertices.values:
+    #echo "eee1"
     r.vertices.add(XVertex(v))
     var h = newRegion(XVertex(v))
     r.regions[XVertex(v).xid] = h
   var hhh = 0
   while r.regions[hhh] != nil:
+    #echo "eee2"
     inc hhh
   r.regions.setLen(hhh)
+  echo "hhh", hhh
   if rndTest:
     var set = toSeq(r.vertices.filterIt(it.xid.int > 3).chunked(2))
     set.sort do (i, j: XT) -> int:
@@ -993,6 +996,7 @@ proc finishInit*(r: Router; rndTest = false) =
         var netDesc = NetDesc(t1Name:v1.name, t2Name: v2.name)
         r.netlist.add(netDesc)
   for v in r.cdt.subdivision.vertices.values:
+    #echo "eee3"
     var hhh: seq[Vertex]
     for n in v.neightbors:
       hhh.add(n)
@@ -1001,16 +1005,22 @@ proc finishInit*(r: Router; rndTest = false) =
       if XVertex(nx[0]).cid == -1 or XVertex(nx[2]).cid == -1 or XVertex(nx[0]).cid != XVertex(nx[2]).cid:
         kkk.add(nx[1])
     for n in v.neightbors:
+      #echo "eee4"
       assert n != v
       XVertex(v).neighbors.add(XVertex(n))
+      echo "eee5"
       if r.regions.len > XVertex(v).xid:
         assert n != v
+        echo "eee6", " ",  XVertex(v).xid, " ",  XVertex(n).xid
         r.regions[XVertex(v).xid].neighbors.add(r.regions[XVertex(n).xid])
         for el in r.regions[XVertex(n).xid].neighbors:
+          echo "eee7"
           assert el != r.regions[XVertex(n).xid]
       var hx = newCut(XVertex(v), XVertex(n))
+      echo "eee8"
       r.newcuts[(XVertex(v), XVertex(n))] = hx
       r.newcuts[(XVertex(n), XVertex(v))] = hx
+      #echo "eee9"
       assert(XVertex(v).core == XVertex(v).radius)
 
 # UGLY: for debugging only
@@ -1695,20 +1705,20 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
             distances[wVXRgt] = newDistance
 
   var path: seq[Region]
+  #static: # does not compile
+  #  assert(RRbNil == (nil, nil, false))
   var p = min
-  while p != (nil, nil, false):
+  while p != RRbNil:#(nil, nil, false):
     var n = parents.getOrDefault(p, RRbNil)
-    if n != (nil, nil, false):
+    if n != RRbNil:#(nil, nil, false):
       assert n[0] == p[1]
       #n[0].outer = outerLane[p]
       n[0].outer = outerLane.getOrDefault(p, false)
-      #n[0].lrTurn = p[2] == outerLane[p]
       n[0].lrTurn = p[2] == n[0].outer
     path.add(p[0])
     p = n
-  var cid = path[^1].vertex.cid
+  let cid = path[^1].vertex.cid
   if cid != -1: # ignore steps along edges of start cluster
-    #while path[-2].vertex.cid == cid:
     while path[^2].vertex.cid == cid:
       discard path.pop
   r.dijkstraUsePath(path, netDesc)
@@ -2422,7 +2432,7 @@ when isMainModule:
   Clearance = 1.3 
   main()
 # 2275 lines float dup text proc popom find vcid cid cornersfix dijkstra lineTo random genArcX dijkstra pic Router arc kkk drawRoutesX
-# neighbors cornerfix drawRoutesX  drawRoutesX 88 fullAngle lrTurn outer echo triangleArea2 `-` openArray
+# neighbors cornerfix drawRoutesX  drawRoutesX 88 fullAngle lrTurn outer echo triangleArea2 `-` openArray finishInit
 
 #[
             for el in rep:
