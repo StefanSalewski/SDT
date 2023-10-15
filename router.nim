@@ -1628,7 +1628,7 @@ proc dijkstra(r: Router; startNode: Region; endNodeName: string; netDesc: NetDes
             echo "aaaa", triangleArea2(u, v, w), " ", triangleArea2(u, w, v)
             assert almostEqual(triangleArea2(u, v, w), triangleArea2(u, w, v), 1000)
             #let nd = hypot(w.vertex.x - u.vertex.x, w.vertex.y - u.vertex.y) + distances[pom] + triangleArea2(u, v, w).sqrt * 0.02 # malus for big triangle? Not a good idea
-            let nd = hypot(w.vertex.x - u.vertex.x, w.vertex.y - u.vertex.y) + distances[pom]
+            let nd = hypot(w.vertex.x - u.vertex.x, w.vertex.y - u.vertex.y) * 1.02 + distances[pom]
             if nd < newDistance: # caution, this may give diagonals instead straight connections for PCB pads! 20230408
               newDistance = [nd, oldDistance].max
           else:
@@ -2300,12 +2300,15 @@ proc drawRoutes*(r: Router; layer = 0) =
         lastx = t[2]
         lasty = t[3]
         
-proc drawRoutesX*(r: Router; cr: cairo.Context; showDelaunay, showDijkstra: bool) =
+proc drawRoutesX*(r: Router; cr: cairo.Context; showDelaunay, showDijkstra: bool, lay: int) =
+  var alpha = 1.0
+  if lay != 0:
+    alpha = 0.5
   #discard r.file.open("layer_#{2 - layer}.pcb", fmwrite)
   #if layer == 0:
   #  r.genVias()
   if showDelaunay:
-    cr.setSource(0, 0, 0, 0.5)
+    cr.setSource(0, 0, 0, 0.5 * alpha)
     cr.setLineWidth(0.1)
     for e in edges(r.cdt):
       cr.moveTo(e.org.point[0], e.org.point[1])
@@ -2313,7 +2316,7 @@ proc drawRoutesX*(r: Router; cr: cairo.Context; showDelaunay, showDijkstra: bool
     cr.stroke
   # 0, 0, 0  0, 0, 1
   cr.setLineWidth(0.2)
-  cr.setSource(0, 0, 1, 0.7)
+  cr.setSource(0, 0, 1, 0.7 * alpha)
   var s: seq[array[3, int]]
   var colindex: int = -1
   #for el in permutations([0, 1, 1]):
@@ -2328,13 +2331,13 @@ proc drawRoutesX*(r: Router; cr: cairo.Context; showDelaunay, showDijkstra: bool
     for el in r.allRoutes:
       colindex = (colindex + 1) mod s.len
       let h = s[colindex].mapIt(it.float)
-      cr.setSource(h[0], h[1], h[2], 0.7)
+      cr.setSource(h[0], h[1], h[2], 0.7 * alpha)
       cr.arc(el[0][0], el[0][1], 0.5, 0, 2 * math.PI)
       cr.lineTo(el[0][0], el[0][1])
       for p in el:
         cr.lineTo(p[0], p[1])
       cr.stroke
-  cr.setSource(0, 0, 0, 1)
+  cr.setSource(0, 0, 0, 1 * alpha)
   #cr.setLineWidth(0.05)###########################################################
   for vert in r.vertices:
     for n in vert.incidentNets:
@@ -2366,7 +2369,7 @@ proc drawRoutesX*(r: Router; cr: cairo.Context; showDelaunay, showDijkstra: bool
             if not lastNet.rgt:
               (startAngle, endAngle) = (endAngle, startAngle)# unless lastNet.rgt
             cr.genArcX(last.x, last.y, lr, startAngle, endAngle, thi)
-            cr.setSource(0, 0, 0, 1)
+            cr.setSource(0, 0, 0, 1 * alpha)
         lr = radius
         last = to
         toNet = toNet.nstep

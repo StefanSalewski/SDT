@@ -447,7 +447,8 @@ proc newPosAdj: PosAdj =
 # we have basic geometric elements like lines, and we can group them together.
 # groups can contain basic elements and subgroups
 
-proc sortedTuple(a, b: float): rtree.Ext[float] =
+#proc sortedTuple(a, b: float): rtree.Ext[float] = # im Compiler Version 2.1.1 issue 
+proc sortedTuple(a, b: float): (float, float) =
   if a <= b: (a, b) else: (b, a)
 
 const
@@ -591,7 +592,7 @@ type
   PDA = ref object of gtk4.Grid
     copyPaste: Element
     netList: NetList
-    router: Router
+    router: seq[Router] # one entry for each layer
     layerAssignment: Assignment
     attrGrid: gtk4.Grid
     cm: ConMark
@@ -2012,7 +2013,8 @@ proc draw(pda: PDA) =
   pda.drawGrid
   pda.cr.setOperator(Operator.over)
   if pda.routed:
-    pda.router.drawRoutesX(pda.cr, pda.showDelaunay, pda.showDijkstra)
+    for iii, r in pda.router:
+      r.drawRoutesX(pda.cr, pda.showDelaunay, pda.showDijkstra, iii)
   for p in pda.tree.allNetEnds:
       inc(pda.cm, p)
   for p in pda.tree.allNetEnds:
@@ -2861,102 +2863,108 @@ proc routePCB(action: gio.SimpleAction; parameter: glib.Variant; pda: PDA) =
   pda.layerAssignment.getVias
   pda.layerAssignment.savePicture
   pda.routed = true
-  let r = newRouter(-200, -200, 250, 250)
-  var tab: Table[V2, XVertex]
-  pda.router = r
-  for el in pda.tree.elements:
-    if el of Group:
-      for p in Group(el).gerberPads:
-        GCid += 1
-        echo "GCid", GCid
-        for i, c in p.corners:
-          echo "AAAY: ", c[0], " ", c[1]
-          var v = newXVertex(c[0], c[1])
-          v.cid = GCid
-          if i > 3:
-            v.cornerfix = 0.01
-          tab[[c[0], c[1]]] = XVertex(r.cdt.insertPoint(Vector(x: v.x, y: v.y), v))
 
-  # #########################
-  echo "gdone"
-  # generate the net desk list
+  pda.router.setLen(0)
+  for lay in 0 .. 1: # for all layers
+
+    let r = newRouter(-200, -200, 250, 250)
+    var tab: Table[V2, XVertex]
+    pda.router.add(r)
+    for el in pda.tree.elements:
+      if lay != 0:
+        continue
+      if el of Group:
+        for p in Group(el).gerberPads:
+          GCid += 1
+          echo "GCid", GCid
+          for i, c in p.corners:
+            echo "AAAY: ", c[0], " ", c[1]
+            var v = newXVertex(c[0], c[1])
+            v.cid = GCid
+            if i > 3:
+              v.cornerfix = 0.01
+            tab[[c[0], c[1]]] = XVertex(r.cdt.insertPoint(Vector(x: v.x, y: v.y), v))
+
+    # #########################
+    echo "gdone"
+    # generate the net desk list
 
 
-  var hnl: seq[array[4, float]]
-  for n in pda.layerAssignment.output2nets: # ignore style for now
-    for s in n.path:
-      echo "GH", s.layer
-      # if s.layer == layer: # actually do this for all the layers
-      #if s.layer == 0:
-      hnl.add([s.x1, s.y1, s.x2, s.y2])
-  for iii, el in pairs(hnl):
-    echo iii, "ZZZ", router.VertexClassID, " ", r.cdt.subdivision.vertices.len
-    var (x1, y1, x2, y2) = (el[0], el[1], el[2], el[3])
-    jecho "BBB", x1, y1, x2, y2
-    var v1: XVertex
-    if tab.hasKey([x1, y1]):
-      echo "haskey 1"
-      v1 = tab[[x1, y1]]
-    else:
-      v1 = newXVertex(x1, y1) 
-      tab[[x1, y1]] = XVertex(r.cdt.insertPoint(Vector(x: v1.x, y: v1.y), v1))
-      v1 = tab[[x1, y1]]
-    echo "ccc"
-    var v2: XVertex
-    if tab.hasKey([x2, y2]):
-      echo "haskey 2"
-      v2 = tab[[x2, y2]]
-      let hhh1 = newXVertex(x2, y2)
-      router.VertexClassID -= 1
-      let hhh = XVertex(x: x2, y: y2)
-      assert v2 == XVertex(r.cdt.insertPoint(Vector(x: v2.x, y: v2.y), nil))
-      assert v2 == XVertex(r.cdt.insertPoint(Vector(x: v2.x, y: v2.y), hhh))
-      assert hhh != XVertex(r.cdt.insertPoint(Vector(x: v2.x, y: v2.y), hhh))
-    else:
-      v2 = newXVertex(x2, y2)
-      tab[[x2, y2]] = XVertex(r.cdt.insertPoint(Vector(x: v2.x, y: v2.y), v2))
-      v2 = tab[[x2, y2]]
-    echo "ddd"
-    var fff = nextName(r)
-    if v1.name.len == 0:
-      v1.name = fff & 's'
-    if v2.name.len == 0:
-      v2.name = fff & 'e'
-    var netDesc = NetDesc(t1Name:v1.name, t2Name: v2.name, destCid: v2.cid)
-    r.netlist.add(netDesc)
-  echo "ZZZ", router.VertexClassID
-  r.finishInit
-  r.filename = "pic" & ".png"
-  #r.drawVertices
-  #col = ([1, 0, 0].permutation(3).toA + [1, 1, 0].permutation(3).toA).uniq - [[1, 0, 0]]
+    var hnl: seq[array[4, float]]
+    for n in pda.layerAssignment.output2nets: # ignore style for now
+      for s in n.path:
+        echo "GH", s.layer
+        # if s.layer == layer: # actually do this for all the layers
+        if s.layer == lay:
+          hnl.add([s.x1, s.y1, s.x2, s.y2])
+    for iii, el in pairs(hnl):
+      echo iii, "ZZZ", router.VertexClassID, " ", r.cdt.subdivision.vertices.len
+      var (x1, y1, x2, y2) = (el[0], el[1], el[2], el[3])
+      jecho "BBB", x1, y1, x2, y2
+      var v1: XVertex
+      if tab.hasKey([x1, y1]):
+        echo "haskey 1"
+        v1 = tab[[x1, y1]]
+      else:
+        v1 = newXVertex(x1, y1) 
+        tab[[x1, y1]] = XVertex(r.cdt.insertPoint(Vector(x: v1.x, y: v1.y), v1))
+        v1 = tab[[x1, y1]]
+      echo "ccc"
+      var v2: XVertex
+      if tab.hasKey([x2, y2]):
+        echo "haskey 2"
+        v2 = tab[[x2, y2]]
+        let hhh1 = newXVertex(x2, y2)
+        router.VertexClassID -= 1
+        let hhh = XVertex(x: x2, y: y2)
+        assert v2 == XVertex(r.cdt.insertPoint(Vector(x: v2.x, y: v2.y), nil))
+        assert v2 == XVertex(r.cdt.insertPoint(Vector(x: v2.x, y: v2.y), hhh))
+        assert hhh != XVertex(r.cdt.insertPoint(Vector(x: v2.x, y: v2.y), hhh))
+      else:
+        v2 = newXVertex(x2, y2)
+        tab[[x2, y2]] = XVertex(r.cdt.insertPoint(Vector(x: v2.x, y: v2.y), v2))
+        v2 = tab[[x2, y2]]
+      echo "ddd"
+      var fff = nextName(r)
+      if v1.name.len == 0:
+        v1.name = fff & 's'
+      if v2.name.len == 0:
+        v2.name = fff & 'e'
+      var netDesc = NetDesc(t1Name:v1.name, t2Name: v2.name, destCid: v2.cid)
+      r.netlist.add(netDesc)
+    echo "ZZZ", router.VertexClassID
+    r.finishInit
+    r.filename = "pic" & ".png"
+    #r.drawVertices
+    #col = ([1, 0, 0].permutation(3).toA + [1, 1, 0].permutation(3).toA).uniq - [[1, 0, 0]]
 
-  var col = deduplicate(toSeq(combinatorics.permutations([1.0, 0, 0])) & toSeq(combinatorics.permutations([1.0, 1, 0])))
-  r.setColor(1, 0, 0, 0.7)
-  r.setLineWidth(2)
-  # [0,1,2,3,4,5,6,7,8,9].each{|i|
-  for i in 0 .. r.netList.high:# [6, 7, 8, 9]:#, 8, 9]: # [3, 4, 5, 6, 7]:#,1,2,3,4,5,6]:#,7,8,9]:
-    r.setColor(col[i mod 5][0], col[i mod 5][1], col[i mod 5][2], 0.4)
-    #discard r.route(strutils.parseInt(paramStr(1)))
-    discard r.route(i)
+    var col = deduplicate(toSeq(combinatorics.permutations([1.0, 0, 0])) & toSeq(combinatorics.permutations([1.0, 1, 0])))
+    r.setColor(1, 0, 0, 0.7)
+    r.setLineWidth(2)
+    # [0,1,2,3,4,5,6,7,8,9].each{|i|
+    for i in 0 .. r.netList.high:# [6, 7, 8, 9]:#, 8, 9]: # [3, 4, 5, 6, 7]:#,1,2,3,4,5,6]:#,7,8,9]:
+      r.setColor(col[i mod 5][0], col[i mod 5][1], col[i mod 5][2], 0.4)
+      #discard r.route(strutils.parseInt(paramStr(1)))
+      discard r.route(i)
 
-  r.sortAttachedNets
-  r.prepareSteps
-  r.nubly(true)
-  #[
-  r.prepareSteps
-  r.sortAttachedNets
-  r.prepareSteps
-  r.nubly
-  r.prepareSteps
-  r.sortAttachedNets
-  r.prepareSteps
-  r.nubly(true)
-  r.sortAttachedNets
-  r.prepareSteps
-  ]#
-  r.drawRoutes
-  r.flagVertices
-  r.savePicture
+    r.sortAttachedNets
+    r.prepareSteps
+    r.nubly(true)
+    #[
+    r.prepareSteps
+    r.sortAttachedNets
+    r.prepareSteps
+    r.nubly
+    r.prepareSteps
+    r.sortAttachedNets
+    r.prepareSteps
+    r.nubly(true)
+    r.sortAttachedNets
+    r.prepareSteps
+    ]#
+    r.drawRoutes
+    r.flagVertices
+    r.savePicture
 
 proc genCAPC(pda:PDA) =
 #[
